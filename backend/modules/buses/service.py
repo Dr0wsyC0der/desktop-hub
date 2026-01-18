@@ -1,124 +1,101 @@
-import asyncio
 import aiohttp
-from bs4 import BeautifulSoup
-from datetime import datetime
-from typing import List
-
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-
-def to_site_date(date_str: str) -> str:
-    """
-    YYYY-MM-DD -> DD.MM.YYYY
-    """
-    return datetime.strptime(date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
-
-async def parse_stop_schedule(
-    session: aiohttp.ClientSession,
-    base_url: str,
-    stop_name: str,
-    date: str
-) -> List[str]:
-    """
-    Асинхронная версия парсера расписания
-    """
-    params = {
-        "mgt_schedule[date]": to_site_date(date)
-    }
-
-    try:
-        async with session.get(
-            base_url,
-            params=params,
-            headers=HEADERS,
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as resp:
-            resp.raise_for_status()
-            text = await resp.text(encoding="utf-8")
-
-            soup = BeautifulSoup(text, "html.parser")
-
-            stop_div = soup.find(
-                "div",
-                class_="a_dotted d-inline",
-                string=lambda s: s and stop_name in s
-            )
-            if not stop_div:
-                raise ValueError(f"Остановка '{stop_name}' не найдена")
-
-            route_block = stop_div.find_parent("li")
-            if not route_block:
-                raise ValueError("Контейнер остановки не найден")
-
-            schedule_block = route_block.select_one("div.schedule_list_raspisanie")
-            if not schedule_block:
-                raise ValueError("Расписание не найдено")
-
-            times = []
-
-            for row in schedule_block.select("div.raspisanie_data"):
-                hour = row.select_one("div.dt1 strong")
-                if not hour:
-                    continue
-
-                hour = hour.text.replace(":", "").strip()
-
-                for m in row.select("div.div10"):
-                    minute = m.text.strip()
-                    if minute.isdigit():
-                        times.append(f"{int(hour):02d}:{int(minute):02d}")
-
-            return times
-            
-    except Exception as e:
-        print(f"Ошибка при парсинге {base_url}: {e}")
-        return []
-
-async def func(
-    session: aiohttp.ClientSession,
-    base_url: str,
-    stop_name: str,
-    date: str
-) -> List[str]:
-    """
-    Обертка для асинхронного вызова парсера
-    """
-    return await parse_stop_schedule(session, base_url, stop_name, date)
-
-async def main():
-    """
-    Основная асинхронная функция
-    """
-    urls = [
-        "https://transport.mos.ru/transport/schedule/route/141509584", 
-        "https://transport.mos.ru/transport/schedule/route/141509583"
-    ]
-    stop_names = ["Улица Марьинский Парк", "Улица Марьинский Парк"]
-    date = "2026-01-18"
-
-    # Создаем сессию для всех запросов
-    async with aiohttp.ClientSession() as session:
-        # Создаем список задач для параллельного выполнения
-        tasks = []
-        for i in range(len(urls)):
-            task = func(session, urls[i], stop_names[i], date)
-            tasks.append(task)
-        
-        # Выполняем все задачи параллельно
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Обрабатываем результаты
-        for i, result in enumerate(results):
-            print(f"Результат {i+1} ({urls[i]}):")
-            if isinstance(result, Exception):
-                print(f"  Ошибка: {result}")
-            else:
-                print(f"  Время прибытия: {result}")
+import asyncio
+import json
+from pathlib import Path
+from datetime import date, timedelta, datetime
+from backend.parsers.bus_shedule_parser import TransportScheduleParser
 
 
+class BusService:
+    SCHEDULE_PATH = Path("backend/storage/schedule.json")
+    SETTINGS_PATH = Path("backend/storage/settings.json")
 
-if __name__ == "__main__":
-    # Для параллельного выполнения запросов (быстрее)
-    asyncio.run(main())
-    
-    # Или для последовательного выполнения
-    # asyncio.run(main_sequential())
+    def __init__(self):
+        self.settings = self._load_settings()
+        self.parser = TransportScheduleParser()
+
+    async def update_cache(self):
+        today = date.today().isoformat()
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+        async with aiohttp.ClientSession(
+            headers=self.parser.HEADERS
+        ) as session:
+
+            tasks = []
+            meta = []  # <-- ЧТО именно мы парсим
+
+            for stop in self.settings["bus_settings"]["stops"]:
+                url = stop["url"]
+                name = stop["stop_name"]
+
+                tasks.append(self.parser.parse_stop(session, url, name, today))
+                meta.append(("today", url, name))
+
+                tasks.append(self.parser.parse_stop(session, url, name, tomorrow))
+                meta.append(("tomorrow", url, name))
+
+            results = await asyncio.gather(*tasks)
+
+        schedule = self._build_schedule(results, meta)
+        self.save_schedule(schedule)
+
+    def _build_schedule(self, results, meta):
+        schedule = {
+            "today": [],
+            "tomorrow": []
+        }
+
+        for (day, url, name), times in zip(meta, results):
+            schedule[day].append({
+                "url": url,
+                "stop_name": name,
+                "times": times
+            })
+
+        return schedule
+
+    def _load_settings(self) -> dict:
+        if not self.SETTINGS_PATH.exists():
+            raise FileNotFoundError("settings.json not found")
+
+        with open(self.SETTINGS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def save_schedule(self, data: dict):
+        self.SCHEDULE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.SCHEDULE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def get_nearest_bus(self):
+        if not self.SCHEDULE_PATH.exists():
+            return None
+
+        now = datetime.now()
+        today = date.today()
+
+        with open(self.SCHEDULE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        nearest = None
+
+        for stop in data.get("today", []):
+            for bus_time in stop.get("times", []):
+                bus_dt = datetime.strptime(
+                    f"{today} {bus_time}:00",
+                    "%Y-%m-%d %H:%M:%S"
+                )
+
+                if bus_dt >= now:
+                    if nearest is None or bus_dt < nearest["datetime"]:
+                        nearest = {
+                            "stop_name": stop["stop_name"],
+                            "time": bus_time,
+                            "datetime": bus_dt
+                        }
+
+        if nearest:
+            nearest.pop("datetime")
+            return nearest
+
+        return None

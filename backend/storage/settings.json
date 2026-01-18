@@ -1,0 +1,14 @@
+{
+    "bus_settings": {
+        "stops": [
+            {
+                "url": "https://transport.mos.ru/transport/schedule/route/141509584",
+                "stop_name": "Улица Марьинский Парк"
+            },
+            {
+                "url": "https://transport.mos.ru/transport/schedule/route/141509583",
+                "stop_name": "Улица Марьинский Парк"
+            }
+        ]
+    }
+}
