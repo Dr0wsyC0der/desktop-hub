@@ -1,7 +1,7 @@
-from core.event_bus import EventBus
-from core.alive_services import AppContext
-from modules.buses.service import BusService
-from modules.output.console import ConsoleOutput
+from .event_bus import EventBus
+from .alive_services import AppContext
+from ..modules.buses.service import BusService
+from ..modules.output.console import ConsoleOutput
 
 async def boot() -> EventBus:
     bus = EventBus()
