@@ -16,4 +16,7 @@ class EventBus:
             return
 
         for callback in self._subscribers[event_type]:
-            await callback(event)
+            try:
+                await callback(event)
+            except Exception as e:
+                print(f"EventBus error: {e}")   
