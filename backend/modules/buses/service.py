@@ -12,6 +12,7 @@ class BusService:
 
     def __init__(self):
         self.settings = self._load_settings()
+        self.time_interval = self.settings["bus_settings"]["time_interval"]
         self.parser = TransportScheduleParser()
 
     async def update_cache(self):
@@ -28,29 +29,43 @@ class BusService:
             for stop in self.settings["bus_settings"]["stops"]:
                 url = stop["url"]
                 name = stop["stop_name"]
-
+                bus_name = stop["name"]
                 tasks.append(self.parser.parse_stop(session, url, name, today))
-                meta.append(("today", url, name))
+                meta.append(("today", bus_name))
 
                 tasks.append(self.parser.parse_stop(session, url, name, tomorrow))
-                meta.append(("tomorrow", url, name))
+                meta.append(("tomorrow", bus_name))
 
             results = await asyncio.gather(*tasks)
 
         schedule = self._build_schedule(results, meta)
         self.save_schedule(schedule)
+    
+    @staticmethod
+    def time_to_format(time):
+        return datetime.strptime(time, "%H:%M").time()
 
     def _build_schedule(self, results, meta):
         schedule = {
+            "date": date.today().isoformat(),
             "today": [],
             "tomorrow": []
         }
 
-        for (day, url, name), times in zip(meta, results):
+        for (day, bus_name), times in zip(meta, results):
+            start_time = self.time_to_format(self.time_interval["start"])
+            end_time = self.time_to_format(self.time_interval["end"])
+            
+            
+            filtered_times = []
+            for time_str in times:  
+                time_obj = self.time_to_format(time_str)
+                if start_time <= time_obj <= end_time:
+                    filtered_times.append(time_str)
+            
             schedule[day].append({
-                "url": url,
-                "stop_name": name,
-                "times": times
+                "name": bus_name,
+                "times": filtered_times
             })
 
         return schedule

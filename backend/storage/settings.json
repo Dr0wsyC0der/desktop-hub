@@ -3,12 +3,28 @@
         "stops": [
             {
                 "url": "https://transport.mos.ru/transport/schedule/route/141509584",
-                "stop_name": "Улица Марьинский Парк"
+                "stop_name": "Улица Марьинский Парк",
+                "name": "M72"
             },
             {
                 "url": "https://transport.mos.ru/transport/schedule/route/141509583",
-                "stop_name": "Улица Марьинский Парк"
+                "stop_name": "Улица Марьинский Парк",
+                "name": "853"
+            },
+            {
+                "url": "https://transport.mos.ru/transport/schedule/route/141509217",
+                "stop_name": "Улица Марьинский Парк",
+                "name": "C744"
+            },
+            {
+                "url": "https://transport.mos.ru/transport/schedule/route/141509223",
+                "stop_name": "Ул. Марьинский Парк",
+                "name": "C797"
             }
-        ]
+        ],
+        "time_interval": {
+            "start": "7:50",
+            "end": "15:40"
+        }
     }
 }

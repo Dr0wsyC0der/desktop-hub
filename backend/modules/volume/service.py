@@ -27,7 +27,8 @@ class VolumeService:
             if current != self._last:
                 self._last = current
                 await self.bus.publish("volume_changed", {
+                    "type": "volume",
                     "value": current
-                })
+                    })
 
             await asyncio.sleep(self.poll_interval)
