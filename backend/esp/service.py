@@ -94,7 +94,7 @@ class ESPService:
             print("Failed to read schedule file:", e)
             return
 
-        await self.send("schedule", schedule_data)
+        await self._send_schedule(schedule_data)
 
     async def _start_pc_load(self):
         if self._pc_load_running:
@@ -147,13 +147,44 @@ class ESPService:
         })
 
     async def on_volume(self, event):
-        await self.send("volume", event)
+        """
+        Обработка события изменения громкости.
+        event: {"type": "volume", "value": int}
+        Отправляем: {"type": "volume", "value": int}
+        """
+        value = event.get("value")
+        if value is not None:
+            await self.conn.broadcast({
+                "type": "volume",
+                "value": int(value)
+            })
 
     async def on_track(self, event):
-        await self.send("music", event)
+        """
+        Обработка события изменения трека.
+        event: {"name": str, "author": str}
+        Отправляем: {"type": "music", "name": str, "author": str}
+        """
+        name = event.get("name", "")
+        author = event.get("author", "")
+        await self.conn.broadcast({
+            "type": "music",
+            "name": str(name),
+            "author": str(author)
+        })
 
     async def on_load(self, event):
         await self.send("system_load", event)
+
+    async def _send_schedule(self, schedule_data: dict):
+        """
+        Отправка расписания в формате:
+        {"type": "schedule", "payload": dict}
+        """
+        await self.conn.broadcast({
+            "type": "schedule",
+            "payload": schedule_data
+        })
 
     async def send(self, name, payload):
         await self.conn.broadcast({

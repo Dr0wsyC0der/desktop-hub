@@ -24,10 +24,8 @@ class MediaPlayerService:
                     if key != self._last_key:
                         self._last_key = key
                         await self.bus.publish("track_changed", {
-                            "title": props.title,
-                            "artist": props.artist,
-                            "album": props.album_title,
-                            "app": session.source_app_user_model_id
+                            "name": props.title,
+                            "author": props.artist,
                         })
 
             await asyncio.sleep(self.poll_interval)

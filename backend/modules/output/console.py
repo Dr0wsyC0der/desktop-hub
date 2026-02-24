@@ -3,7 +3,7 @@ class ConsoleOutput:
         self.show_album = show_album
 
     async def on_track(self, event):
-        line = f"🎵 {event['artist']} — {event['title']}"
+        line = f"🎵 {event['author']} — {event['name']}"
         if self.show_album and event.get("album"):
             line += f" [{event['album']}]"
         print(line)
