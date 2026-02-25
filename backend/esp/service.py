@@ -170,10 +170,22 @@ class ESPService:
         )
 
     async def send_display_settings(self, payload: dict):
+        # Firmware ws_protocol.cpp handles "settings" with flat keys.
+        brightness_pct = int(payload.get("brightness", 70))
+        led_brightness_pct = int(payload.get("backlight", 70))
+        led_mode = payload.get("led_mode", payload.get("mode", 5))
+        try:
+            led_mode = int(led_mode)
+        except (TypeError, ValueError):
+            led_mode = 5
+
         await self.conn.broadcast_json(
             {
-                "type": "display_settings",
-                "payload": payload,
+                "type": "settings",
+                "screen_brightness": max(0, min(255, round(brightness_pct * 255 / 100))),
+                "led_brightness": max(0, min(255, round(led_brightness_pct * 255 / 100))),
+                "auto_brightness": bool(payload.get("auto_brightness", True)),
+                "led_mode": max(1, min(7, led_mode)),
             }
         )
 

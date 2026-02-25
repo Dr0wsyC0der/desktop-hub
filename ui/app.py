@@ -7,7 +7,28 @@ import flet as ft
 
 
 API_BASE = "http://127.0.0.1:8787/api"
-ELEMENTS = ["city", "time", "weather", "bus", "music", "load"]
+SCREEN1_ELEMENTS = [
+    ("city", "city - City"),
+    ("region", "region - Region"),
+    ("main_hours", "main_hours - Hours"),
+    ("main_minute", "main_minute - Minutes"),
+    ("main_seconds", "main_seconds - Seconds"),
+    ("date", "date - Date"),
+    ("day", "day - Weekday"),
+    ("simb_weather", "simb_weather - Weather icon"),
+    ("templabel", "templabel - Temperature"),
+    ("hmlabel", "hmlabel - Humidity"),
+    ("other_weather", "other_weather - Extra weather"),
+]
+LED_EFFECTS = [
+    ("1", "1 - Static"),
+    ("2", "2 - Breathing"),
+    ("3", "3 - Comet"),
+    ("4", "4 - Rainbow pong"),
+    ("5", "5 - Rainbow"),
+    ("6", "6 - Fire"),
+    ("7", "7 - Matrix"),
+]
 GIF_PRESETS = ["metro_loop.gif", "weather_splash.gif", "retro_scan.gif"]
 
 
@@ -21,6 +42,28 @@ def api_request(path: str, method: str = "GET", data: dict | None = None):
     with urllib.request.urlopen(req, timeout=4) as response:
         raw = response.read().decode("utf-8")
         return json.loads(raw) if raw else {}
+
+
+def normalize_led_mode(value) -> str:
+    legacy_map = {
+        "static": "1",
+        "breath": "2",
+        "breathing": "2",
+        "comet": "3",
+        "rainbow_pong": "4",
+        "rainbow-pong": "4",
+        "rainbow": "5",
+        "fire": "6",
+        "matrix": "7",
+    }
+    if value is None:
+        return "5"
+    as_str = str(value).strip().lower()
+    if as_str in legacy_map:
+        return legacy_map[as_str]
+    if as_str in {key for key, _ in LED_EFFECTS}:
+        return as_str
+    return "5"
 
 
 def main(page: ft.Page):
@@ -37,7 +80,11 @@ def main(page: ft.Page):
     progress_bar = ft.ProgressBar(width=320, value=0)
 
     current_hex = ft.Text("#FFAA00", weight=ft.FontWeight.BOLD)
-    selected_element = ft.Dropdown(label="Элемент", value=ELEMENTS[0], options=[ft.dropdown.Option(e) for e in ELEMENTS])
+    selected_element = ft.Dropdown(
+        label="Element (screen1)",
+        value=SCREEN1_ELEMENTS[0][0],
+        options=[ft.dropdown.Option(key, text) for key, text in SCREEN1_ELEMENTS],
+    )
 
     red = ft.Slider(min=0, max=255, divisions=255, value=255, label="R: {value}")
     green = ft.Slider(min=0, max=255, divisions=255, value=170, label="G: {value}")
@@ -47,11 +94,11 @@ def main(page: ft.Page):
     brightness = ft.Slider(label="Яркость", min=0, max=100, divisions=100, value=70)
     backlight = ft.Slider(label="Подсветка", min=0, max=100, divisions=100, value=70)
     auto_brightness = ft.Switch(label="Автояркость", value=True)
-    lighting_mode = ft.Dropdown(label="Режим подсветки", value="static", options=[
-        ft.dropdown.Option("static", "Статичный"),
-        ft.dropdown.Option("breath", "Дыхание"),
-        ft.dropdown.Option("rainbow", "Радуга"),
-    ])
+    lighting_mode = ft.Dropdown(
+        label="LED Effect (firmware)",
+        value="5",
+        options=[ft.dropdown.Option(key, text) for key, text in LED_EFFECTS],
+    )
 
     wifi_ssid = ft.TextField(label="Wi‑Fi SSID")
     wifi_password = ft.TextField(label="Wi‑Fi пароль", password=True, can_reveal_password=True)
@@ -112,7 +159,7 @@ def main(page: ft.Page):
         brightness.value = display.get("brightness", 70)
         backlight.value = display.get("backlight", 70)
         auto_brightness.value = display.get("auto_brightness", True)
-        lighting_mode.value = display.get("mode", "static")
+        lighting_mode.value = normalize_led_mode(display.get("led_mode", display.get("mode", "5")))
         display_on.value = display.get("on_time", "07:00")
         display_off.value = display.get("off_time", "23:00")
         schedule_hours.value = str(schedule.get("hours_ahead", 4))
@@ -159,6 +206,7 @@ def main(page: ft.Page):
             "brightness": int(brightness.value),
             "backlight": int(backlight.value),
             "mode": lighting_mode.value,
+            "led_mode": int(normalize_led_mode(lighting_mode.value)),
             "auto_brightness": auto_brightness.value,
         }
         try:
@@ -197,6 +245,7 @@ def main(page: ft.Page):
                     "brightness": int(brightness.value),
                     "backlight": int(backlight.value),
                     "mode": lighting_mode.value,
+                    "led_mode": int(normalize_led_mode(lighting_mode.value)),
                     "auto_brightness": auto_brightness.value,
                     "on_time": display_on.value,
                     "off_time": display_off.value,
