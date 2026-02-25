@@ -1,12 +1,14 @@
 import asyncio
 import json
 from datetime import date, datetime
-from typing import Optional
+from pathlib import Path
+from typing import Awaitable, Callable, Optional
 
 import GPUtil
 import psutil
 
 from .connection import ESPConnection
+from .gif_codec import build_rgb565_from_gif
 from ..models.esp.commands import ESPCommand
 from ..core.alive_services import AppContext
 
@@ -16,6 +18,14 @@ class ESPService:
         self.bus = bus
         self.conn = ESPConnection()
         self.last_message = None
+        self._gif_lock = asyncio.Lock()
+        self._gif_assets_dirs = [
+            Path("backend/storage/gifs"),
+            Path("ui/assets/gifs"),
+            Path("ui/assets"),
+            Path("assets/gifs"),
+            Path("assets"),
+        ]
 
         # Параметры мониторинга нагрузки ПК
         self._pc_load_interval: float = 0.5
@@ -148,6 +158,102 @@ class ESPService:
             "gpu": gpu,
             "ram": ram,
         })
+
+    async def send_color(self, *, screen: str, element: str, color: str):
+        await self.conn.broadcast_json(
+            {
+                "type": "set_color",
+                "screen": screen,
+                "element": element,
+                "color": color,
+            }
+        )
+
+    async def send_display_settings(self, payload: dict):
+        await self.conn.broadcast_json(
+            {
+                "type": "display_settings",
+                "payload": payload,
+            }
+        )
+
+    async def send_all_settings(self, settings: dict):
+        """
+        Keep backward compatibility with current ESP firmware (`settings_update`)
+        and also send the display block as a dedicated command if it exists.
+        """
+        await self.conn.broadcast_json({"type": "settings_update", "payload": settings})
+
+        display_payload = settings.get("display")
+        if isinstance(display_payload, dict):
+            await self.send_display_settings(display_payload)
+
+    async def send_gif(
+        self,
+        *,
+        name: str,
+        remove_frames: list[int] | None = None,
+        width: int = 80,
+        height: int = 80,
+        delay_ms: int = 200,
+        chunk_size: int = 1460,
+        chunk_delay_sec: float = 0.03,
+        progress_cb: Optional[Callable[[str, int, str], Awaitable[None]]] = None,
+    ):
+        async with self._gif_lock:
+            if progress_cb:
+                await progress_cb("working", 5, "Подготовка GIF")
+
+            gif_path = self._resolve_gif_path(name)
+            payload = build_rgb565_from_gif(
+                gif_path,
+                name=Path(name).name,
+                width=int(width),
+                height=int(height),
+                delay_ms=int(delay_ms),
+                remove_frames=remove_frames or [],
+            )
+
+            if progress_cb:
+                await progress_cb("working", 35, "Отправка метаданных GIF")
+
+            await self.conn.broadcast_json(payload.metadata())
+            await asyncio.sleep(0.6)
+
+            total = payload.total_size or 1
+            sent = 0
+
+            if progress_cb:
+                await progress_cb("working", 45, "Отправка GIF на устройство")
+
+            for i in range(0, len(payload.data), max(1, int(chunk_size))):
+                chunk = payload.data[i:i + int(chunk_size)]
+                await self.conn.broadcast_bytes(chunk)
+                sent += len(chunk)
+
+                # 45..100 reserved for transfer progress.
+                progress = 45 + int((sent / total) * 55)
+                if progress_cb:
+                    await progress_cb("working", min(progress, 99), f"Отправка GIF: {sent}/{total} байт")
+
+                if chunk_delay_sec > 0:
+                    await asyncio.sleep(chunk_delay_sec)
+
+            if progress_cb:
+                await progress_cb("done", 100, "GIF отправлена")
+
+    def _resolve_gif_path(self, name: str) -> Path:
+        raw = Path(name)
+        if raw.is_file():
+            return raw
+
+        for base in self._gif_assets_dirs:
+            candidate = base / name
+            if candidate.is_file():
+                return candidate
+
+        searched = ", ".join(str(p) for p in self._gif_assets_dirs)
+        raise FileNotFoundError(f"GIF '{name}' not found. Searched in: {searched}")
 
     async def on_volume(self, event):
         """

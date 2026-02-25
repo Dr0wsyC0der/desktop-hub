@@ -48,7 +48,7 @@ class ESPConnection:
 
         self.server = await websockets.serve(handler, self.host, self.port)
 
-    async def broadcast(self, data: dict):
+    async def broadcast_json(self, data: dict):
         if not self.clients:
             return
 
@@ -56,4 +56,13 @@ class ESPConnection:
         await asyncio.gather(
             *[ws.send(message) for ws in self.clients]
         )
+
+    async def broadcast_bytes(self, data: bytes):
+        if not self.clients:
+            return
+        await asyncio.gather(*[ws.send(data) for ws in self.clients])
+
+    async def broadcast(self, data: dict):
+        # Backward-compatible alias used across the existing codebase.
+        await self.broadcast_json(data)
 

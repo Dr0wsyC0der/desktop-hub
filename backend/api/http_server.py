@@ -82,27 +82,34 @@ class APIServer:
 
     async def post_color(self, request: web.Request):
         payload = await request.json()
+        esp_service = self._require_esp_service()
+        await esp_service.send_color(
+            screen=payload.get("screen", "screen1"),
+            element=payload["element"],
+            color=payload["color"],
+        )
         command = {
             "type": "set_color",
             "screen": payload.get("screen", "screen1"),
             "element": payload["element"],
             "color": payload["color"],
         }
-        await self._send_to_esp(command)
         return web.json_response({"ok": True, "command": command})
 
     async def post_display(self, request: web.Request):
         payload = await request.json()
+        esp_service = self._require_esp_service()
+        await esp_service.send_display_settings(payload)
         command = {
             "type": "display_settings",
             "payload": payload,
         }
-        await self._send_to_esp(command)
         return web.json_response({"ok": True, "command": command})
 
     async def post_gif(self, request: web.Request):
         payload = await request.json()
-        asyncio.create_task(self._simulate_gif_transfer(payload))
+        self._gif_state = {"stage": "queued", "progress": 0, "message": "GIF queued"}
+        asyncio.create_task(self._run_gif_transfer(payload))
         return web.json_response({"ok": True})
 
     async def get_settings(self, _request: web.Request):
@@ -114,7 +121,8 @@ class APIServer:
         current = self._load_settings()
         merged = self._deep_merge(current, payload)
         self._save_settings(merged)
-        await self._send_to_esp({"type": "settings_update", "payload": merged})
+        esp_service = self._require_esp_service()
+        await esp_service.send_all_settings(merged)
         return web.json_response({"ok": True, "settings": merged})
 
     async def _simulate_gif_transfer(self, payload: dict[str, Any]):
@@ -140,12 +148,39 @@ class APIServer:
         await self._send_to_esp(command)
         self._gif_state = {"stage": "done", "progress": 100, "message": "GIF отправлена"}
 
-    async def _send_to_esp(self, payload: dict[str, Any]):
+    async def _run_gif_transfer(self, payload: dict[str, Any]):
+        try:
+            esp_service = self._require_esp_service()
+            await esp_service.send_gif(
+                name=payload.get("name", "custom.gif"),
+                remove_frames=payload.get("remove_frames", []),
+                width=int(payload.get("width", 80)),
+                height=int(payload.get("height", 80)),
+                delay_ms=int(payload.get("delay", payload.get("delay_ms", 200))),
+                chunk_size=int(payload.get("chunk_size", 1460)),
+                chunk_delay_sec=float(payload.get("chunk_delay_sec", 0.03)),
+                progress_cb=self._set_gif_state,
+            )
+        except Exception as e:
+            self._gif_state = {"stage": "error", "progress": 0, "message": f"GIF error: {e}"}
+
+    async def _set_gif_state(self, stage: str, progress: int, message: str):
+        self._gif_state = {
+            "stage": stage,
+            "progress": max(0, min(int(progress), 100)),
+            "message": message,
+        }
+
+    def _require_esp_service(self):
         esp_service = AppContext.esp_service
         if esp_service is None:
             raise web.HTTPServiceUnavailable(text="ESP service not ready")
         if not esp_service.is_connected():
             raise web.HTTPBadRequest(text="ESP is not connected")
+        return esp_service
+
+    async def _send_to_esp(self, payload: dict[str, Any]):
+        esp_service = self._require_esp_service()
         await esp_service.conn.broadcast(payload)
 
     def _load_settings(self) -> dict[str, Any]:
