@@ -15,6 +15,7 @@ class ESPService:
     def __init__(self, bus):
         self.bus = bus
         self.conn = ESPConnection()
+        self.last_message = None
 
         # Параметры мониторинга нагрузки ПК
         self._pc_load_interval: float = 0.5
@@ -38,6 +39,8 @@ class ESPService:
         {"type": "pc_load", "action": "stop"}
         {"type": "schedule_date", "date": "2026-02-12"}
         """
+        self.last_message = raw_msg
+
         try:
             data = json.loads(raw_msg)
         except json.JSONDecodeError:
@@ -172,6 +175,10 @@ class ESPService:
             "name": str(name),
             "author": str(author)
         })
+
+
+    def is_connected(self) -> bool:
+        return len(self.conn.clients) > 0
 
     async def on_load(self, event):
         await self.send("system_load", event)
