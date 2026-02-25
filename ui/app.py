@@ -236,15 +236,15 @@ def main(page: ft.Page):
         selected_element,
         ft.Row([red, green, blue]),
         ft.Row([color_preview, current_hex]),
-        ft.ElevatedButton("Применить цвет", icon=ft.Icons.PALETTE, on_click=send_color),
+        ft.Button("Применить цвет", icon=ft.Icons.PALETTE, on_click=send_color),
     ], scroll=ft.ScrollMode.AUTO)
 
     gif_tab = ft.Column([
         ft.Text("GIF анимации", size=22, weight=ft.FontWeight.BOLD),
         gif_dropdown,
-        ft.ElevatedButton("Сгенерировать список кадров", on_click=populate_frames, icon=ft.Icons.ANIMATION),
+        ft.Button("Сгенерировать список кадров", on_click=populate_frames, icon=ft.Icons.ANIMATION),
         frame_checks,
-        ft.ElevatedButton("Отправить GIF", icon=ft.Icons.UPLOAD_FILE, on_click=send_gif),
+        ft.Button("Отправить GIF", icon=ft.Icons.UPLOAD_FILE, on_click=send_gif),
         progress_text,
         progress_bar,
     ], scroll=ft.ScrollMode.AUTO)
@@ -255,7 +255,7 @@ def main(page: ft.Page):
         backlight,
         lighting_mode,
         auto_brightness,
-        ft.ElevatedButton("Отправить настройки экрана", icon=ft.Icons.TUNE, on_click=send_display),
+        ft.Button("Отправить настройки экрана", icon=ft.Icons.TUNE, on_click=send_display),
     ], scroll=ft.ScrollMode.AUTO)
 
     settings_tab = ft.Column([
@@ -266,22 +266,37 @@ def main(page: ft.Page):
         ft.Row([weather_lat, weather_lon, weather_timeout]),
         ft.Row([display_on, display_off, schedule_hours]),
         schedule_sources,
-        ft.ElevatedButton("Сохранить все настройки", icon=ft.Icons.SAVE, on_click=save_all_settings),
+        ft.Button("Сохранить все настройки", icon=ft.Icons.SAVE, on_click=save_all_settings),
     ], scroll=ft.ScrollMode.AUTO)
 
     tabs_controls.extend([color_tab, gif_tab, display_tab, settings_tab])
 
+
     tabs = ft.Tabs(
         selected_index=0,
         animation_duration=200,
-        tabs=[
-            ft.Tab(text="Главная", icon=ft.Icons.HOME, content=home_tab),
-            ft.Tab(text="Цвета", icon=ft.Icons.PALETTE, content=color_tab),
-            ft.Tab(text="GIF", icon=ft.Icons.MOVIE, content=gif_tab),
-            ft.Tab(text="Экран", icon=ft.Icons.LIGHT_MODE, content=display_tab),
-            ft.Tab(text="Настройки", icon=ft.Icons.SETTINGS, content=settings_tab),
-        ],
+        length=5,
         expand=1,
+        content=ft.Column(
+            [
+                ft.TabBar(
+                    scrollable=False,
+                    tabs=[
+                        ft.Tab(label="Главная", icon=ft.Icons.HOME),
+                        ft.Tab(label="Цвета", icon=ft.Icons.PALETTE),
+                        ft.Tab(label="GIF", icon=ft.Icons.MOVIE),
+                        ft.Tab(label="Экран", icon=ft.Icons.LIGHT_MODE),
+                        ft.Tab(label="Настройки", icon=ft.Icons.SETTINGS),
+                    ],
+                ),
+                ft.TabBarView(
+                    controls=[home_tab, color_tab, gif_tab, display_tab, settings_tab],
+                    expand=True,
+                ),
+            ],
+            expand=True,
+            spacing=0,
+        ),
     )
 
     page.add(tabs)
@@ -299,4 +314,4 @@ def main(page: ft.Page):
     page.run_task(polling_loop)
 
 
-ft.app(target=main)
+ft.run(main)

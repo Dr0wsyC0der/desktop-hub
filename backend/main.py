@@ -1,12 +1,25 @@
 import asyncio
+import sys
+from pathlib import Path
 
-from .api.http_server import APIServer
-from .core.alive_services import AppContext
-from .core.lifecycle import boot
-from .esp.service import ESPService
-from .modules.music.service import MediaPlayerService
-from .modules.system_monitor.service import AsyncSystemMonitor
-from .modules.volume.service import VolumeService
+if __package__ in (None, ""):
+    # Allow running via `python backend/main.py` from the project root.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from backend.api.http_server import APIServer
+    from backend.core.alive_services import AppContext
+    from backend.core.lifecycle import boot
+    from backend.esp.service import ESPService
+    from backend.modules.music.service import MediaPlayerService
+    from backend.modules.system_monitor.service import AsyncSystemMonitor
+    from backend.modules.volume.service import VolumeService
+else:
+    from .api.http_server import APIServer
+    from .core.alive_services import AppContext
+    from .core.lifecycle import boot
+    from .esp.service import ESPService
+    from .modules.music.service import MediaPlayerService
+    from .modules.system_monitor.service import AsyncSystemMonitor
+    from .modules.volume.service import VolumeService
 
 
 async def main():
