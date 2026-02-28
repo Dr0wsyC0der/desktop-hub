@@ -9,7 +9,6 @@ async def boot() -> EventBus:
     console = ConsoleOutput(show_album=True)
     bus.subscribe("track_changed", console.on_track)
     bus.subscribe("volume_changed", console.on_volume)
-    bus.subscribe("big_system_load", console.on_load)
 
     bus_service = BusService()
     try:

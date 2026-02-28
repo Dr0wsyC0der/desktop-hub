@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from datetime import date, datetime
 from pathlib import Path
@@ -9,7 +10,6 @@ import psutil
 
 from .connection import ESPConnection
 from .gif_codec import build_rgb565_from_gif
-from ..models.esp.commands import ESPCommand
 from ..core.alive_services import AppContext
 
 
@@ -170,35 +170,79 @@ class ESPService:
         )
 
     async def send_display_settings(self, payload: dict):
-        # Firmware ws_protocol.cpp handles "settings" with flat keys.
-        brightness_pct = int(payload.get("brightness", 70))
-        led_brightness_pct = int(payload.get("backlight", 70))
+        brightness_pct = self._percent(payload.get("brightness", 70))
+        command = {
+            "type": "settings",
+            "screen_brightness": self._to_byte(brightness_pct),
+            "auto_brightness": bool(payload.get("weather_dependent", payload.get("auto_brightness", False))),
+        }
+
+        if "weather_brightness" in payload:
+            command["screen_weather_brightness"] = self._to_byte(payload.get("weather_brightness", brightness_pct))
+
+        await self.conn.broadcast_json(command)
+
+    async def send_backlight_settings(self, payload: dict):
+        brightness_pct = self._percent(payload.get("brightness", payload.get("backlight", 70)))
         led_mode = payload.get("led_mode", payload.get("mode", 5))
         try:
             led_mode = int(led_mode)
         except (TypeError, ValueError):
             led_mode = 5
 
-        await self.conn.broadcast_json(
-            {
-                "type": "settings",
-                "screen_brightness": max(0, min(255, round(brightness_pct * 255 / 100))),
-                "led_brightness": max(0, min(255, round(led_brightness_pct * 255 / 100))),
-                "auto_brightness": bool(payload.get("auto_brightness", True)),
-                "led_mode": max(1, min(7, led_mode)),
-            }
-        )
+        command = {
+            "type": "settings",
+            "led_brightness": self._to_byte(brightness_pct),
+            "led_mode": max(1, min(7, led_mode)),
+            "led_weather_dependent": bool(payload.get("weather_dependent", False)),
+        }
+
+        color = payload.get("color")
+        if color:
+            command["led_color"] = str(color)
+
+        if "weather_brightness" in payload:
+            command["led_weather_brightness"] = self._to_byte(payload.get("weather_brightness", brightness_pct))
+
+        await self.conn.broadcast_json(command)
 
     async def send_all_settings(self, settings: dict):
         """
         Keep backward compatibility with current ESP firmware (`settings_update`)
-        and also send the display block as a dedicated command if it exists.
+        and also send display/backlight blocks as dedicated commands.
         """
         await self.conn.broadcast_json({"type": "settings_update", "payload": settings})
 
         display_payload = settings.get("display")
         if isinstance(display_payload, dict):
             await self.send_display_settings(display_payload)
+
+        backlight_payload = settings.get("backlight")
+        if isinstance(backlight_payload, dict):
+            await self.send_backlight_settings(backlight_payload)
+
+    async def send_ota_command(self, firmware_path: str):
+        path = Path(firmware_path)
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(f"Firmware file not found: {firmware_path}")
+
+        checksum = hashlib.sha1()
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                checksum.update(chunk)
+
+        await self.conn.broadcast_json(
+            {
+                "type": "ota_update",
+                "name": path.name,
+                "size": path.stat().st_size,
+                "sha1": checksum.hexdigest(),
+                "path": str(path),
+            }
+        )
 
     async def send_gif(
         self,
@@ -294,6 +338,16 @@ class ESPService:
             "author": str(author)
         })
 
+
+    def _percent(self, value: int | float | str) -> int:
+        try:
+            number = int(float(value))
+        except (TypeError, ValueError):
+            number = 70
+        return max(0, min(number, 100))
+
+    def _to_byte(self, value: int | float | str) -> int:
+        return max(0, min(255, round(self._percent(value) * 255 / 100)))
 
     def is_connected(self) -> bool:
         return len(self.conn.clients) > 0

@@ -11,9 +11,3 @@ class ConsoleOutput:
     async def on_volume(self, event):
         print(f"🔊 Громкость: {event['value']}%")
     
-    async def on_load(self, event):
-        print("⚠️ РЕЗКИЙ РОСТ НАГРУЗКИ СИСТЕМЫ:")
-        print(f"CPU: {event['cpu']:.1f}%")
-        print(f"RAM: {event['ram']:.1f}%")
-        print(f"GPU: {event['gpu']:.1f}%")
-        print("-" * 30)
