@@ -11,5 +11,6 @@ void loadSettings();
 void updateConnectionStatus();
 void updateAutoBrightness();
 void updateSleepMode();
+void triggerSleepScreenPreview(unsigned long durationMs = 5000);
 
 #endif

@@ -2,24 +2,151 @@
 #include "app_state.h"
 #include "ws_protocol.h"
 #include <WebSocketsClient.h>
+#include <WiFiUDP.h>
 #include <LittleFS.h>
 #include <FS.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
 #include "ui_logic.h"
 #include "device_control.h"
 
 WebSocketsClient webSocket;
-unsigned long lastWsReconnectAttempt = 0;
-const unsigned long WS_RECONNECT_INTERVAL = 5000;
-unsigned long deviceBootTime = 0;
+WiFiUDP discoveryUdp;
 
-const unsigned long WS_BOOT_PHASE_DURATION = 60000;    // 2 минуты
-const unsigned long WS_BOOT_RETRY_INTERVAL = 5000;     // каждые 5 сек
-const unsigned long WS_NORMAL_RETRY_INTERVAL = 900000; // 15 минут
-bool wsConnecting = false;
-unsigned long wsConnectStartTime = 0;
-const unsigned long WS_CONNECT_TIMEOUT = 10000; // 10 секунд на попытку
-static bool wsBeginCalled = false;              // был ли begin() вызван хоть раз
-static bool wsParked = false;                   // "припаркованы" — не крутим loop
+static const uint16_t WS_DISCOVERY_PORT = 45678;
+static const unsigned long WS_CONNECT_TIMEOUT = 10000;
+static const unsigned long WS_RETRY_COOLDOWN = 3000;
+
+static bool wsConnecting = false;
+static unsigned long wsConnectStartTime = 0;
+static bool wsBeginCalled = false;
+static bool udpListening = false;
+static unsigned long wsCooldownUntil = 0;
+
+static void saveDiscoveredPcIp(const String &ip)
+{
+    if (ip.length() == 0 || appState.pcIP == ip)
+    {
+        return;
+    }
+
+    appState.pcIP = ip;
+
+    Preferences prefs;
+    prefs.begin("deskhub", false);
+    prefs.putString("pcIP", ip);
+    prefs.end();
+}
+
+static void setDiscoveryListening(bool enable)
+{
+    if (enable)
+    {
+        if (udpListening || !appState.wifiConnected)
+        {
+            return;
+        }
+
+        if (discoveryUdp.begin(WS_DISCOVERY_PORT))
+        {
+            udpListening = true;
+            Serial.printf("[UDP] Listening on %u\n", WS_DISCOVERY_PORT);
+        }
+        else
+        {
+            Serial.println("[UDP] Failed to start listener");
+        }
+        return;
+    }
+
+    if (!udpListening)
+    {
+        return;
+    }
+
+    discoveryUdp.stop();
+    udpListening = false;
+    Serial.println("[UDP] Discovery stopped");
+}
+
+static void beginWebSocketConnect(const String &ip)
+{
+    if (!appState.wifiConnected || ip.length() == 0 || appState.pcConnected)
+    {
+        return;
+    }
+
+    if (millis() < wsCooldownUntil)
+    {
+        return;
+    }
+
+    Serial.printf("[WS] Connecting to ws://%s:%d%s\n",
+                  ip.c_str(),
+                  appState.wsPort,
+                  appState.wsPath.c_str());
+
+    if (wsBeginCalled)
+    {
+        webSocket.disconnect();
+    }
+
+    webSocket.begin(ip.c_str(), appState.wsPort, appState.wsPath.c_str());
+    wsBeginCalled = true;
+    wsConnecting = true;
+    wsConnectStartTime = millis();
+    appState.isDataLoading = true;
+    updateConnectionStatus();
+    setDiscoveryListening(false);
+}
+
+static void handleDiscoveryPacket()
+{
+    if (!udpListening || wsConnecting || appState.pcConnected)
+    {
+        return;
+    }
+
+    int packetSize = discoveryUdp.parsePacket();
+    if (packetSize <= 0)
+    {
+        return;
+    }
+
+    char payload[384];
+    int read = discoveryUdp.read(payload, sizeof(payload) - 1);
+    if (read <= 0)
+    {
+        return;
+    }
+    payload[read] = '\0';
+
+    DynamicJsonDocument doc(256);
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err)
+    {
+        Serial.printf("[UDP] JSON parse error: %s\n", err.c_str());
+        return;
+    }
+
+    String type = doc["type"] | "";
+    if (!(type.equalsIgnoreCase("ws_discovery") || type.equalsIgnoreCase("ws_discowery")))
+    {
+        return;
+    }
+
+    String ip = doc["ip"] | "";
+    IPAddress ipAddr;
+    if (!ipAddr.fromString(ip))
+    {
+        Serial.printf("[UDP] Invalid discovery IP: %s\n", ip.c_str());
+        return;
+    }
+
+    String discoveredIp = ipAddr.toString();
+    saveDiscoveredPcIp(discoveredIp);
+    beginWebSocketConnect(discoveredIp);
+}
 
 void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length)
 {
@@ -27,25 +154,45 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length)
     {
     case WStype_DISCONNECTED:
         wsConnecting = false;
-        wsParked = true;
         appState.pcConnected = false;
         appState.isDataLoading = false;
+        wsCooldownUntil = millis() + WS_RETRY_COOLDOWN;
         updateConnectionStatus();
-        Serial.println("[WS] Disconnected");
+        if (payload != nullptr && length > 0)
+        {
+            String reason;
+            reason.reserve(length + 1);
+            for (size_t i = 0; i < length; i++)
+            {
+                reason += static_cast<char>(payload[i]);
+            }
+            Serial.printf("[WS] Disconnected: %s\n", reason.c_str());
+        }
+        else
+        {
+            Serial.println("[WS] Disconnected");
+        }
+        setDiscoveryListening(appState.wifiConnected);
         break;
 
     case WStype_CONNECTED:
         wsConnecting = false;
-        wsParked = false;
         appState.pcConnected = true;
         appState.isDataLoading = false;
+        wsCooldownUntil = 0;
         updateConnectionStatus();
         Serial.println("[WS] Connected");
+        setDiscoveryListening(false);
         break;
 
     case WStype_TEXT:
     {
-        String message((char *)payload);
+        String message;
+        message.reserve(length + 1);
+        for (size_t i = 0; i < length; i++)
+        {
+            message += static_cast<char>(payload[i]);
+        }
         Serial.println("[WS] Received: " + message);
         processWebSocketMessage(message);
         break;
@@ -59,17 +206,15 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length)
                 animFile.write(payload, length);
                 appState.animReceivedBytes += length;
 
-                // Выводим лог прогресса каждые ~15 КБ, чтобы не перегружать консоль
-                // Или если это последний пакет
                 if (appState.animReceivedBytes % 14600 == 0 || appState.animReceivedBytes >= appState.animTotalSize)
                 {
+                    const size_t total = appState.animTotalSize == 0 ? 1 : appState.animTotalSize;
                     Serial.printf("[Anim] Downloading: %u / %u bytes (%u%%)\n",
                                   appState.animReceivedBytes,
                                   appState.animTotalSize,
-                                  (appState.animReceivedBytes * 100) / appState.animTotalSize);
+                                  (appState.animReceivedBytes * 100) / total);
                 }
 
-                // Даем системе обработать фоновые задачи (WiFi, TCP)
                 yield();
             }
 
@@ -77,9 +222,10 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length)
             {
                 animFile.close();
                 appState.animReceiving = false;
+                appState.isDataLoading = false;
+                updateConnectionStatus();
                 Serial.println("[Anim] Transfer complete! Finalizing...");
 
-                // Проверка: реально ли файл записался
                 File check = LittleFS.open("/anim.bin", "r");
                 if (check)
                 {
@@ -93,6 +239,23 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length)
         }
         break;
 
+    case WStype_ERROR:
+        if (payload != nullptr && length > 0)
+        {
+            String err;
+            err.reserve(length + 1);
+            for (size_t i = 0; i < length; i++)
+            {
+                err += static_cast<char>(payload[i]);
+            }
+            Serial.printf("[WS] Error: %s\n", err.c_str());
+        }
+        else
+        {
+            Serial.println("[WS] Error");
+        }
+        break;
+
     default:
         break;
     }
@@ -100,87 +263,67 @@ void onWebSocketEvent(WStype_t type, uint8_t *payload, size_t length)
 
 void initWebSocketClient()
 {
-    deviceBootTime = millis();
     webSocket.onEvent(onWebSocketEvent);
-    webSocket.setReconnectInterval(0);         // 🚫 отключаем авто-реконнект
-    webSocket.enableHeartbeat(15000, 3000, 2); // можно оставить heartbeat
+    webSocket.setReconnectInterval(0);
+    webSocket.enableHeartbeat(30000, 10000, 2);
+    setDiscoveryListening(appState.wifiConnected);
 }
 
 void updateWebSocketClient()
 {
-    // Если соединение установлено — всегда крутим loop
-    if (appState.pcConnected)
+    if (!appState.wifiConnected)
     {
-        webSocket.loop();
-        return;
-    }
-
-    // Если идёт активная попытка — крутим loop и следим за таймаутом
-    if (wsConnecting)
-    {
-        webSocket.loop();
-        if (millis() - wsConnectStartTime > WS_CONNECT_TIMEOUT)
+        if (udpListening)
         {
-            Serial.println("[WS] Connect timeout. Parking socket.");
-            webSocket.disconnect();
-            wsConnecting = false;
-            wsParked = true; // останавливаем loop до следующей попытки
+            setDiscoveryListening(false);
         }
         return;
     }
 
-    // Пока "припаркованы" — НЕ вызываем loop, библиотека молчит
-    reconnectWebSocket();
+    if (appState.pcConnected || wsConnecting)
+    {
+        webSocket.loop();
+    }
+
+    if (wsConnecting && millis() - wsConnectStartTime > WS_CONNECT_TIMEOUT)
+    {
+        Serial.println("[WS] Connect timeout");
+        webSocket.disconnect();
+        wsConnecting = false;
+        appState.isDataLoading = false;
+        wsCooldownUntil = millis() + WS_RETRY_COOLDOWN;
+        updateConnectionStatus();
+        setDiscoveryListening(true);
+    }
+
+    if (!appState.pcConnected && !wsConnecting)
+    {
+        setDiscoveryListening(true);
+        handleDiscoveryPacket();
+    }
 }
 
 void reconnectWebSocket()
 {
     if (!appState.wifiConnected || appState.pcConnected)
-        return;
-
-    unsigned long now = millis();
-    bool inBootPhase = (now - deviceBootTime) < WS_BOOT_PHASE_DURATION;
-    unsigned long retryInterval = inBootPhase ? WS_BOOT_RETRY_INTERVAL : WS_NORMAL_RETRY_INTERVAL;
-
-    if (now - lastWsReconnectAttempt < retryInterval)
-        return;
-
-    lastWsReconnectAttempt = now;
-
-    if (appState.pcIP.length() == 0)
-        return;
-
-    Serial.print("[WS] Reconnect attempt (");
-    Serial.print(inBootPhase ? "BOOT" : "NORMAL");
-    Serial.print(") to ");
-    Serial.print(appState.pcIP);
-    Serial.print(":");
-    Serial.print(appState.wsPort);
-    Serial.println(appState.wsPath);
-
-    wsParked = false; // снимаем парковку — начинаем новую попытку
-
-    if (wsBeginCalled)
     {
-        webSocket.disconnect();
-        delay(50);
+        return;
     }
 
-    webSocket.begin(appState.pcIP.c_str(), appState.wsPort, appState.wsPath.c_str());
-    wsBeginCalled = true;
+    String ip = appState.pcIP;
+    if (ip.length() == 0)
+    {
+        setDiscoveryListening(true);
+        return;
+    }
 
-    wsConnecting = true;
-    wsConnectStartTime = now;
-
-    appState.isDataLoading = true;
-    updateConnectionStatus();
+    beginWebSocketConnect(ip);
 }
 
 void sendWebSocketMessage(const String &message)
 {
     if (appState.pcConnected)
     {
-        // WebSocketsClient::sendTXT expects a non-const String&, make a mutable copy
         String tmp = message;
         webSocket.sendTXT(tmp);
     }
@@ -193,32 +336,56 @@ bool isWebSocketConnected()
 
 void forceWebSocketReconnect()
 {
-    if (!appState.wifiConnected || appState.pcConnected)
+    if (!appState.wifiConnected)
+    {
         return;
+    }
 
-    Serial.println("[WS] FORCE reconnect attempt");
-
-    // ВАЖНО: мы не трогаем deviceBootTime
-    // Просто сбрасываем интервал ожидания
-
-    lastWsReconnectAttempt = millis(); // чтобы следующий авто retry был через 15 мин
-
-    wsParked = false;
+    Serial.println("[WS] Force reconnect");
 
     if (wsBeginCalled)
     {
         webSocket.disconnect();
-        delay(50);
     }
 
-    webSocket.begin(appState.pcIP.c_str(),
-                    appState.wsPort,
-                    appState.wsPath.c_str());
+    wsConnecting = false;
+    appState.pcConnected = false;
+    appState.isDataLoading = false;
+    wsCooldownUntil = 0;
+    updateConnectionStatus();
 
-    wsBeginCalled = true;
-    wsConnecting = true;
-    wsConnectStartTime = millis();
+    if (appState.pcIP.length() > 0)
+    {
+        beginWebSocketConnect(appState.pcIP);
+    }
+    else
+    {
+        setDiscoveryListening(true);
+    }
+}
 
-    appState.isDataLoading = true;
+void onWiFiConnectionChanged(bool connected)
+{
+    if (connected)
+    {
+        wsConnecting = false;
+        appState.pcConnected = false;
+        appState.isDataLoading = false;
+        wsCooldownUntil = 0;
+        setDiscoveryListening(true);
+        updateConnectionStatus();
+        return;
+    }
+
+    if (wsBeginCalled)
+    {
+        webSocket.disconnect();
+    }
+
+    wsConnecting = false;
+    appState.pcConnected = false;
+    appState.isDataLoading = false;
+    wsCooldownUntil = 0;
+    setDiscoveryListening(false);
     updateConnectionStatus();
 }

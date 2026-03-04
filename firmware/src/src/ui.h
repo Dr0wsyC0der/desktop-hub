@@ -57,6 +57,8 @@ LV_IMG_DECLARE(ui_img_1944143706);    // assets/icons8-облака-96.png
 LV_IMG_DECLARE(ui_img_1863757787);    // assets/icons8-буря-96.png
 LV_IMG_DECLARE(ui_img_1630223647);    // assets/icons8-частичная-облачность-96.png
 LV_IMG_DECLARE(ui_img_139835185);    // assets/icons8-мокрый-снег-96.png
+LV_IMG_DECLARE(ui_img_moon_png);    // assets/moon.png
+LV_IMG_DECLARE(ui_img_fog_png);    // assets/fog.png
 LV_IMG_DECLARE(ui_img_sound_png);    // assets/sound.png
 LV_IMG_DECLARE(ui_img_1230472841);    // assets/icons8-автобус-96.png
 LV_IMG_DECLARE(ui_img_835527434);    // assets/icons8-процессор-96.png

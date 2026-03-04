@@ -10,7 +10,6 @@ if __package__ in (None, ""):
     from backend.core.lifecycle import boot
     from backend.esp.service import ESPService
     from backend.modules.music.service import MediaPlayerService
-    from backend.modules.system_monitor.service import AsyncSystemMonitor
     from backend.modules.volume.service import VolumeService
 else:
     from .api.http_server import APIServer
@@ -18,7 +17,6 @@ else:
     from .core.lifecycle import boot
     from .esp.service import ESPService
     from .modules.music.service import MediaPlayerService
-    from .modules.system_monitor.service import AsyncSystemMonitor
     from .modules.volume.service import VolumeService
 
 
@@ -32,7 +30,6 @@ async def main():
     services = [
         MediaPlayerService(bus),
         VolumeService(bus),
-        AsyncSystemMonitor(bus),
         esp_service,
         api_server,
     ]

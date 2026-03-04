@@ -11,6 +11,7 @@ void handleBusScheduleCommand(JsonObject doc);
 void handlePcLoadCommand(JsonDocument &doc);
 void handleSetColorCommand(JsonDocument &doc);
 void handleSettingsCommand(JsonDocument &doc);
+void handleLedStateCommand(JsonDocument &doc);
 void handleOtaCommand(JsonDocument &doc);
 void handleGifCommand(JsonDocument &doc);
 

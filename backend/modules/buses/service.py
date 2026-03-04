@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from datetime import date, timedelta, datetime
 from backend.parsers.bus_shedule_parser import TransportScheduleParser
+from backend.core.network import has_internet
 
 
 class BusService:
@@ -16,6 +17,10 @@ class BusService:
         self.parser = TransportScheduleParser()
 
     async def update_cache(self):
+        if not await has_internet():
+            print("No internet connection: skip schedule update")
+            return
+
         today = date.today().isoformat()
         tomorrow = (date.today() + timedelta(days=1)).isoformat()
 

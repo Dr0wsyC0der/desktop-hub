@@ -52,7 +52,7 @@ LED_EFFECTS = [
     ("6", "6 - Fire"),
     ("7", "7 - Matrix"),
 ]
-LED_MODES_WITH_COLOR = {"1", "2"}
+LED_MODES_WITH_COLOR = {"1", "2", "3"}
 HEX_PATTERN = re.compile(r"^#?[0-9A-Fa-f]{6}$")
 
 
@@ -470,10 +470,10 @@ def main(page: ft.Page):
     element_picker = RGBColorPicker(page, title="Element color")
     backlight_picker = RGBColorPicker(page, title="Backlight mode color", initial_hex="#33CCFF")
 
-    screen_brightness = ft.Slider(label="Screen brightness: {value}%", min=0, max=100, divisions=100, value=70)
+    screen_brightness = ft.Slider(label="Screen brightness: {value}", min=0, max=255, divisions=255, value=180)
     screen_weather_dependent = ft.Switch(label="Brightness depends on weather", value=False)
 
-    backlight_brightness = ft.Slider(label="Backlight brightness: {value}%", min=0, max=100, divisions=100, value=70)
+    backlight_brightness = ft.Slider(label="Backlight brightness: {value}", min=0, max=255, divisions=255, value=180)
     backlight_mode = ft.Dropdown(
         label="Backlight mode",
         value="5",
@@ -482,14 +482,13 @@ def main(page: ft.Page):
     )
     backlight_weather_dependent = ft.Switch(label="Brightness depends on weather", value=False)
 
-    wifi_ssid = ft.TextField(label="Wi-Fi SSID")
-    wifi_password = ft.TextField(label="Wi-Fi password", password=True, can_reveal_password=True)
     weather_api_key = ft.TextField(label="Weather API key")
     weather_lat = ft.TextField(label="Latitude", value="55.7558")
     weather_lon = ft.TextField(label="Longitude", value="37.6173")
     weather_timeout = ft.TextField(label="Weather request timeout (sec)", value="1800")
     display_on = ft.TextField(label="Display on time", value="07:00")
     display_off = ft.TextField(label="Display off time", value="23:00")
+    ws_port = ft.TextField(label="WS port (restart backend after change)", value="8765", width=280, keyboard_type=ft.KeyboardType.NUMBER)
 
     schedule_start = ft.TextField(label="Schedule from", value="07:30", width=220)
     schedule_end = ft.TextField(label="Schedule to", value="19:30", width=220)
@@ -522,10 +521,17 @@ def main(page: ft.Page):
     selected_gif_path = {"path": ""}
     gif_loading = {"value": False}
 
-    ota_file_text = ft.Text("Firmware file not selected", color="#334155")
-    ota_pick_button = ft.Button("Select firmware")
+    ota_url = ft.TextField(label="Firmware URL", hint_text="https://example.com/firmware.bin")
+    ota_warning_text = ft.Text("Device will download firmware by URL after confirmation.", color="#64748B")
     ota_flash_button = ft.Button("Flash firmware", icon=ft.Icons.SYSTEM_UPDATE_ALT)
-    selected_firmware = {"path": ""}
+    factory_reset_warning_text = ft.Text(
+        "\u0421\u0431\u0440\u043e\u0441 \u0432\u0435\u0440\u043d\u0435\u0442 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 ESP \u043a \u0437\u0430\u0432\u043e\u0434\u0441\u043a\u0438\u043c.",
+        color="#64748B",
+    )
+    factory_reset_button = ft.Button(
+        "\u0421\u0431\u0440\u043e\u0441 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a",
+        icon=ft.Icons.RESTART_ALT,
+    )
 
     action_controls: list[ft.Control] = []
 
@@ -554,9 +560,9 @@ def main(page: ft.Page):
 
     def update_settings_summary():
         settings_summary.value = (
-            f"Display: {int(screen_brightness.value)}% "
+            f"Display: {int(screen_brightness.value)} "
             f"(weather={screen_weather_dependent.value}) | "
-            f"Backlight: mode {backlight_mode.value}, {int(backlight_brightness.value)}% "
+            f"Backlight: mode {backlight_mode.value}, {int(backlight_brightness.value)} "
             f"(weather={backlight_weather_dependent.value}) | "
             f"Schedule: {schedule_start.value or '-'} - {schedule_end.value or '-'}"
         )
@@ -717,11 +723,6 @@ def main(page: ft.Page):
         page.run_task(_task)
         page.update()
 
-    def apply_firmware_file(path: str):
-        selected_firmware["path"] = path
-        ota_file_text.value = selected_firmware["path"]
-        page.update()
-
     def pick_gif(_):
         if gif_loading["value"]:
             return
@@ -730,17 +731,7 @@ def main(page: ft.Page):
             return
         apply_gif_file(selected)
 
-    def pick_firmware(_):
-        selected = pick_file_with_dialog(
-            "Select firmware file",
-            [("Firmware files", "*.bin *.uf2 *.zip"), ("All files", "*.*")],
-        )
-        if not selected:
-            return
-        apply_firmware_file(selected)
-
     gif_picker_button.on_click = pick_gif
-    ota_pick_button.on_click = pick_firmware
 
     def send_gif(_):
         if not selected_gif_path["path"]:
@@ -765,18 +756,67 @@ def main(page: ft.Page):
     gif_send_button.on_click = send_gif
 
     def send_ota(_):
-        firmware_path = selected_firmware["path"]
-        if not firmware_path:
-            toast("Select firmware file first", ok=False)
+        url = (ota_url.value or "").strip()
+        if not url:
+            toast("Enter firmware URL first", ok=False)
             return
 
-        try:
-            call_api("/esp/ota", "POST", {"firmware_path": firmware_path})
-            toast("OTA flashing started")
-        except RuntimeError as e:
-            toast(f"OTA error: {e}", ok=False)
+        def close_dialog(_event=None):
+            page.pop_dialog()
+            page.update()
+
+        def confirm_ota(_event=None):
+            close_dialog()
+            try:
+                call_api("/esp/command", "POST", {"type": "ota", "url": url})
+                toast("OTA command sent")
+            except RuntimeError as e:
+                toast(f"OTA error: {e}", ok=False)
+
+        warning_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Warning before OTA"),
+            content=ft.Text(
+                "Before flashing, ensure stable power supply and move device closer to router."
+            ),
+            actions=[
+                ft.TextButton("Cancel", on_click=close_dialog),
+                ft.TextButton("OK", on_click=confirm_ota),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        page.show_dialog(warning_dialog)
 
     ota_flash_button.on_click = send_ota
+
+    def send_factory_reset(_):
+        def close_dialog(_event=None):
+            page.pop_dialog()
+            page.update()
+
+        def confirm_reset(_event=None):
+            close_dialog()
+            try:
+                call_api("/esp/command", "POST", {"type": "factory_reset"})
+                toast("Factory reset command sent")
+            except RuntimeError as e:
+                toast(f"Factory reset error: {e}", ok=False)
+
+        warning_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("\u041f\u0440\u0435\u0434\u0443\u043f\u0440\u0435\u0436\u0434\u0435\u043d\u0438\u0435"),
+            content=ft.Text(
+                "\u0411\u0443\u0434\u0443\u0442 \u0441\u0431\u0440\u043e\u0448\u0435\u043d\u044b \u0432\u0441\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 ESP. \u041f\u0440\u043e\u0434\u043e\u043b\u0436\u0438\u0442\u044c?"
+            ),
+            actions=[
+                ft.TextButton("Cancel", on_click=close_dialog),
+                ft.TextButton("OK", on_click=confirm_reset),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        page.show_dialog(warning_dialog)
+
+    factory_reset_button.on_click = send_factory_reset
 
     def load_settings():
         try:
@@ -784,30 +824,28 @@ def main(page: ft.Page):
         except RuntimeError:
             return
 
-        wifi = data.get("wifi", {})
         weather = data.get("weather", {})
         display = data.get("display", {})
         backlight = data.get("backlight", {})
         schedule = data.get("schedule", {})
         ota = data.get("ota", {})
-
-        wifi_ssid.value = wifi.get("ssid", "")
-        wifi_password.value = wifi.get("password", "")
+        network = data.get("network", {})
 
         weather_api_key.value = weather.get("api_key", "")
         weather_lat.value = str(weather.get("latitude", ""))
         weather_lon.value = str(weather.get("longitude", ""))
         weather_timeout.value = str(weather.get("timeout_sec", 1800))
 
-        screen_brightness.value = int(display.get("brightness", 70))
+        screen_brightness.value = int(display.get("brightness", 180))
         screen_weather_dependent.value = bool(display.get("weather_dependent", display.get("auto_brightness", False)))
 
-        backlight_brightness.value = int(backlight.get("brightness", display.get("backlight", 70)))
+        backlight_brightness.value = int(backlight.get("brightness", display.get("backlight", 180)))
         backlight_mode.value = normalize_led_mode(backlight.get("mode", backlight.get("led_mode", display.get("mode", "5"))))
         backlight_weather_dependent.value = bool(backlight.get("weather_dependent", False))
 
         display_on.value = str(display.get("on_time", "07:00"))
         display_off.value = str(display.get("off_time", "23:00"))
+        ws_port.value = str(network.get("ws_port", 8765))
 
         schedule_start.value = str(schedule.get("start_time", "07:30"))
         schedule_end.value = str(schedule.get("end_time", "19:30"))
@@ -828,8 +866,7 @@ def main(page: ft.Page):
         except Exception:
             backlight_picker.set_hex("#33CCFF")
 
-        selected_firmware["path"] = str(ota.get("firmware_path", ""))
-        ota_file_text.value = selected_firmware["path"] or "Firmware file not selected"
+        ota_url.value = str(ota.get("url", ""))
 
         toggle_screen_manual()
         toggle_backlight_manual()
@@ -848,11 +885,12 @@ def main(page: ft.Page):
         ]
 
     def save_all_settings(_):
+        try:
+            ws_port_value = int((ws_port.value or "8765").strip())
+        except Exception:
+            ws_port_value = 8765
+
         payload = {
-            "wifi": {
-                "ssid": wifi_ssid.value,
-                "password": wifi_password.value,
-            },
             "weather": {
                 "api_key": weather_api_key.value,
                 "latitude": weather_lat.value,
@@ -879,15 +917,21 @@ def main(page: ft.Page):
                 "sources": collect_schedule_sources(),
             },
             "ota": {
-                "firmware_path": selected_firmware["path"],
+                "url": (ota_url.value or "").strip(),
+            },
+            "network": {
+                "ws_port": max(1, min(ws_port_value, 65535)),
             },
         }
 
         try:
             result = call_api("/settings", "PUT", payload)
             sent = bool(result.get("sent_to_esp", False))
+            esp_connected = bool(result.get("esp_connected", False))
             if sent:
                 toast("Settings saved and sent to ESP")
+            elif esp_connected:
+                toast("Settings saved (no ESP updates needed)")
             else:
                 toast("Settings saved locally (ESP offline)")
         except Exception as e:
@@ -1043,11 +1087,9 @@ def main(page: ft.Page):
     settings_tab = ft.Column(
         [
             ft.Text("System settings", size=22, weight=ft.FontWeight.BOLD),
-            wifi_ssid,
-            wifi_password,
             weather_api_key,
             ft.Row([weather_lat, weather_lon, weather_timeout], spacing=10),
-            ft.Row([display_on, display_off], spacing=10),
+            ft.Row([display_on, display_off, ws_port], spacing=10),
             ft.Text("Schedule window", size=18, weight=ft.FontWeight.W_600),
             ft.Row([schedule_start, schedule_end], spacing=10),
             ft.Text("Schedule sources", size=18, weight=ft.FontWeight.W_600),
@@ -1061,10 +1103,21 @@ def main(page: ft.Page):
     ota_tab = ft.Column(
         [
             ft.Text("OTA", size=22, weight=ft.FontWeight.BOLD),
-            ft.Row([ota_pick_button, ota_flash_button], spacing=10),
-            ota_file_text,
+            ota_url,
+            ota_warning_text,
+            ota_flash_button,
             ota_progress_text,
             ota_progress_bar,
+        ],
+        spacing=12,
+        scroll=ft.ScrollMode.AUTO,
+    )
+
+    reset_tab = ft.Column(
+        [
+            ft.Text("\u0421\u0431\u0440\u043e\u0441", size=22, weight=ft.FontWeight.BOLD),
+            factory_reset_warning_text,
+            factory_reset_button,
         ],
         spacing=12,
         scroll=ft.ScrollMode.AUTO,
@@ -1073,6 +1126,7 @@ def main(page: ft.Page):
     action_controls.extend(
         [
             ota_flash_button,
+            factory_reset_button,
             color_apply_button,
             screen_apply_button,
             backlight_apply_button,
@@ -1082,7 +1136,7 @@ def main(page: ft.Page):
     tabs = ft.Tabs(
         selected_index=0,
         animation_duration=220,
-        length=7,
+        length=8,
         expand=1,
         content=ft.Column(
             [
@@ -1095,11 +1149,12 @@ def main(page: ft.Page):
                         ft.Tab(label="Экран", icon=ft.Icons.DISPLAY_SETTINGS),
                         ft.Tab(label="Подсветка", icon=ft.Icons.LIGHTBULB),
                         ft.Tab(label="Настройки", icon=ft.Icons.SETTINGS),
+                        ft.Tab(label="\u0421\u0431\u0440\u043e\u0441", icon=ft.Icons.RESTART_ALT),
                         ft.Tab(label="OTA", icon=ft.Icons.SYSTEM_UPDATE_ALT),
                     ],
                 ),
                 ft.TabBarView(
-                    controls=[home_tab, color_tab, gif_tab, screen_tab, backlight_tab, settings_tab, ota_tab],
+                    controls=[home_tab, color_tab, gif_tab, screen_tab, backlight_tab, settings_tab, reset_tab, ota_tab],
                     expand=True,
                 ),
             ],

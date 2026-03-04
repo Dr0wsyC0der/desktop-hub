@@ -1,30 +1,93 @@
 {
-    "bus_settings": {
-        "stops": [
-            {
-                "url": "https://transport.mos.ru/transport/schedule/route/141509584",
-                "stop_name": "Улица Марьинский Парк",
-                "name": "M72"
-            },
-            {
-                "url": "https://transport.mos.ru/transport/schedule/route/141509583",
-                "stop_name": "Улица Марьинский Парк",
-                "name": "853"
-            },
-            {
-                "url": "https://transport.mos.ru/transport/schedule/route/141509217",
-                "stop_name": "Улица Марьинский Парк",
-                "name": "C744"
-            },
-            {
-                "url": "https://transport.mos.ru/transport/schedule/route/141509223",
-                "stop_name": "Ул. Марьинский Парк",
-                "name": "C797"
-            }
-        ],
-        "time_interval": {
-            "start": "7:50",
-            "end": "15:40"
-        }
+  "wifi": {
+    "ssid": "",
+    "password": ""
+  },
+  "weather": {
+    "api_key": "707344a78ee0496c27ce68397d7b322f",
+    "latitude": "55.140385",
+    "longitude": "37.455784",
+    "timeout_sec": 1800
+  },
+  "display": {
+    "brightness": 255,
+    "weather_dependent": false,
+    "off_time": "22:00",
+    "on_time": "07:00",
+    "accent_color": "#72FF4B"
+  },
+  "backlight": {
+    "brightness": 168,
+    "mode": "2",
+    "led_mode": 2,
+    "weather_dependent": false,
+    "color": "#FF5916"
+  },
+  "schedule": {
+    "start_time": "07:50",
+    "end_time": "15:40",
+    "sources": [
+      {
+        "url": "https://transport.mos.ru/transport/schedule/route/141509584",
+        "stop_name": "Улица Марьинский Парк",
+        "bus_number": "M72"
+      },
+      {
+        "url": "https://transport.mos.ru/transport/schedule/route/141509583",
+        "stop_name": "Улица Марьинский Парк",
+        "bus_number": "853"
+      },
+      {
+        "url": "https://transport.mos.ru/transport/schedule/route/141509217",
+        "stop_name": "Улица Марьинский Парк",
+        "bus_number": "C744"
+      },
+      {
+        "url": "https://transport.mos.ru/transport/schedule/route/141509223",
+        "stop_name": "Ул. Марьинский Парк",
+        "bus_number": "C797"
+      }
+    ]
+  },
+  "ota": {
+    "url": "",
+    "firmware_path": ""
+  },
+  "network": {
+    "ws_port": 8765,
+    "udp_port": 45678
+  },
+  "ui_colors": {
+    "screen1": {
+      "main_minute": "#FF3DB2"
     }
+  },
+  "bus_settings": {
+    "stops": [
+      {
+        "url": "https://transport.mos.ru/transport/schedule/route/141509584",
+        "stop_name": "Улица Марьинский Парк",
+        "name": "M72"
+      },
+      {
+        "url": "https://transport.mos.ru/transport/schedule/route/141509583",
+        "stop_name": "Улица Марьинский Парк",
+        "name": "853"
+      },
+      {
+        "url": "https://transport.mos.ru/transport/schedule/route/141509217",
+        "stop_name": "Улица Марьинский Парк",
+        "name": "C744"
+      },
+      {
+        "url": "https://transport.mos.ru/transport/schedule/route/141509223",
+        "stop_name": "Ул. Марьинский Парк",
+        "name": "C797"
+      }
+    ],
+    "time_interval": {
+      "start": "07:50",
+      "end": "15:40"
+    }
+  }
 }

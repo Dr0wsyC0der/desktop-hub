@@ -7,7 +7,6 @@
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <time.h>
-#include <ArduinoOTA.h>
 #include <LittleFS.h>
 #include <freertos/semphr.h>
 #include <Adafruit_BME280.h>
@@ -23,6 +22,7 @@
 #include "ui_logic.h"
 #include "helpers.h"
 #include "bme_manager.h"
+#include "ota_manager.h"
 
 Adafruit_BME280 bme;
 bool bmeInitialized = false;
@@ -59,26 +59,29 @@ void lvglTask(void *pvParameters)
 // Она работает в фоне и не тормозит кнопку
 void weatherTask(void *pvParameters)
 {
+  static const int WEATHER_STARTUP_RETRY_SEC = 5;
+
   vTaskDelay(pdMS_TO_TICKS(2000));
   while (1)
   {
-    // Обновляем погоду раз в 10 минут, но только если есть WiFi
     if (appState.wifiConnected)
     {
-      // updateWeather делает HTTP запрос - это долго, поэтому делаем это БЕЗ мьютекса UI
-      // Но внутри updateWeather мы пишем в структуру weatherData.
-      // В идеале нужен мьютекс данных, но пока просто аккуратно.
       updateWeather();
 
-      // А вот обновить дисплей нужно с мьютексом
       if (xSemaphoreTake(uiMutex, portMAX_DELAY) == pdTRUE)
       {
         updateWeatherDisplay();
         xSemaphoreGive(uiMutex);
       }
+
+      int timeoutSec = (weatherData.lastUpdate == 0)
+                           ? WEATHER_STARTUP_RETRY_SEC
+                           : constrain(appState.weatherTimeoutSec, 60, 86400);
+      vTaskDelay(pdMS_TO_TICKS((uint32_t)timeoutSec * 1000UL));
+      continue;
     }
-    // Спим 10 минут (600000 мс)
-    vTaskDelay(pdMS_TO_TICKS(600000));
+
+    vTaskDelay(pdMS_TO_TICKS(5000));
   }
 }
 // -------------------------------
@@ -90,6 +93,16 @@ static lv_disp_draw_buf_t draw_buf;
 static lv_color_t *buf1;
 static lv_color_t *buf2;
 bool webServerRunning = false;
+static bool apModeActive = false;
+static bool wifiConnectInProgress = false;
+static unsigned long wifiAttemptStartedAt = 0;
+static unsigned long wifiNextAttemptAt = 0;
+static uint8_t wifiRetryCount = 0;
+
+static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 12000;
+static const unsigned long WIFI_RETRY_BASE_MS = 3000;
+static const unsigned long WIFI_RETRY_MAX_MS = 60000;
+static bool startupWaitingForSync = false;
 
 class LGFX : public lgfx::LGFX_Device
 {
@@ -163,18 +176,13 @@ void loadConfig()
     appState.weatherLon = prefs.getFloat("weatherLon", 0.0);
     appState.useCoordinates = prefs.getBool("useCoords", false);
   }
+  appState.weatherTimeoutSec = prefs.getUInt("weatherTimeoutSec", appState.weatherTimeoutSec);
 
   appState.animWidth = prefs.getInt("animWidth", 0);
   appState.animHeight = prefs.getInt("animHeight", 0);
   appState.animFrames = prefs.getInt("animFrames", 0);
   appState.animDelay = prefs.getInt("animDelay", 100);
   prefs.end();
-}
-
-void setupOTA()
-{
-  ArduinoOTA.setHostname("deskhub");
-  ArduinoOTA.begin();
 }
 
 void setupWebServer()
@@ -203,7 +211,6 @@ void handleConfig()
   {
     appState.wifiSSID = server.arg("ssid");
     appState.wifiPassword = server.arg("password");
-    appState.pcIP = server.arg("pcip");
     appState.openWeatherAPIKey = server.arg("weatherkey");
     if (server.hasArg("lat"))
     {
@@ -213,6 +220,10 @@ void handleConfig()
     {
       appState.weatherLon = server.arg("lon").toFloat();
     }
+    if (server.hasArg("weather_timeout_sec"))
+    {
+      appState.weatherTimeoutSec = constrain(server.arg("weather_timeout_sec").toInt(), 60, 86400);
+    }
 
     appState.useCoordinates = true;
 
@@ -220,10 +231,10 @@ void handleConfig()
     prefs.begin("deskhub", false);
     prefs.putString("wifiSSID", appState.wifiSSID);
     prefs.putString("wifiPassword", appState.wifiPassword);
-    prefs.putString("pcIP", appState.pcIP);
     prefs.putString("weatherKey", appState.openWeatherAPIKey);
     prefs.putFloat("weatherLat", appState.weatherLat);
     prefs.putFloat("weatherLon", appState.weatherLon);
+    prefs.putUInt("weatherTimeoutSec", (uint32_t)appState.weatherTimeoutSec);
     prefs.putBool("useCoords", appState.useCoordinates);
 
     prefs.putBool("firstBoot", false);
@@ -245,74 +256,184 @@ void time_update_cb(lv_timer_t *timer)
 }
 
 // Изменили функцию WiFi - она теперь возвращает bool, а не висит вечно
-bool connectWiFi()
+void setupAccessPointMode()
+{
+  if (apModeActive)
+  {
+    return;
+  }
+
+  Serial.println("[WiFi] AP mode");
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("deskhub", "");
+  setupWebServer();
+
+  apModeActive = true;
+  wifiConnectInProgress = false;
+  appState.wifiConnected = false;
+  appState.pcConnected = false;
+  appState.isDataLoading = false;
+  updateConnectionStatus();
+  onWiFiConnectionChanged(false);
+}
+
+void scheduleNextWiFiAttempt(const char *reason)
+{
+  unsigned long backoff = WIFI_RETRY_BASE_MS;
+  for (uint8_t i = 0; i < wifiRetryCount; i++)
+  {
+    if (backoff >= WIFI_RETRY_MAX_MS / 2)
+    {
+      backoff = WIFI_RETRY_MAX_MS;
+      break;
+    }
+    backoff *= 2;
+  }
+
+  if (backoff > WIFI_RETRY_MAX_MS)
+  {
+    backoff = WIFI_RETRY_MAX_MS;
+  }
+
+  if (wifiRetryCount < 8)
+  {
+    wifiRetryCount++;
+  }
+  wifiNextAttemptAt = millis() + backoff;
+  Serial.printf("[WiFi] Retry in %lu ms (%s)\n", backoff, reason);
+}
+
+void startWiFiConnectAttempt()
 {
   if (appState.isFirstBoot || appState.wifiSSID.length() == 0)
   {
-    Serial.println("[WiFi] AP mode");
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP("deskhub", "");
-    setupWebServer();
-    return false;
+    setupAccessPointMode();
+    return;
   }
-  appState.isDataLoading = true;
-  updateConnectionStatus();
+
+  if (wifiConnectInProgress || appState.wifiConnected || millis() < wifiNextAttemptAt)
+  {
+    return;
+  }
+
+  apModeActive = false;
+  WiFi.softAPdisconnect(true);
+  webServerRunning = false;
+
   WiFi.mode(WIFI_STA);
   IPAddress primaryDNS(8, 8, 8, 8);
   IPAddress secondaryDNS(8, 8, 4, 4);
   WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE,
               primaryDNS, secondaryDNS);
-  WiFi.begin(appState.wifiSSID.c_str(),
-             appState.wifiPassword.c_str());
-  Serial.print("[WiFi] Connecting");
-  unsigned long startAttemptTime = millis();
-  while (WiFi.status() != WL_CONNECTED &&
-         millis() - startAttemptTime < 10000)
-  {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println();
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    Serial.println("[WiFi] Connected!");
-    appState.wifiConnected = true;
-    WiFi.softAPdisconnect(true);
-    setupOTA();
-    appState.isDataLoading = false;
-    updateConnectionStatus();
+  WiFi.disconnect(false, true);
+  WiFi.begin(appState.wifiSSID.c_str(), appState.wifiPassword.c_str());
 
-    // Ждём DNS (не более 10 секунд)
-    IPAddress ip;
-    int tries = 0;
+  wifiConnectInProgress = true;
+  wifiAttemptStartedAt = millis();
+  appState.isDataLoading = true;
+  updateConnectionStatus();
+  Serial.println("[WiFi] Connecting...");
+}
 
-    while (!WiFi.hostByName("google.com", ip))
-    {
-      Serial.println("[WiFi] Waiting for DNS...");
-      delay(1000);
-      tries++;
-
-      if (tries >= 10)
-      {
-        Serial.println("[WiFi] DNS failed! Restarting...");
-        delay(1000);
-        ESP.restart();
-      }
-    }
-
-    Serial.print("[WiFi] DNS OK: ");
-    Serial.println(ip);
-    return true;
-  }
-
-  // ❌ Если не подключились за 10 секунд — перезагрузка
+void onWiFiConnected()
+{
+  wifiConnectInProgress = false;
+  wifiRetryCount = 0;
+  wifiNextAttemptAt = 0;
+  appState.wifiConnected = true;
   appState.isDataLoading = false;
   updateConnectionStatus();
-  Serial.println("[WiFi] Failed! Restarting...");
-  delay(1000);
-  ESP.restart();
+  onWiFiConnectionChanged(true);
 
-  return false; // формально, но до сюда не дойдёт
+  Serial.print("[WiFi] Connected: ");
+  Serial.println(WiFi.localIP());
+}
+
+void onWiFiDisconnected(const char *reason)
+{
+  wifiConnectInProgress = false;
+  appState.wifiConnected = false;
+  appState.pcConnected = false;
+  appState.isDataLoading = false;
+  updateConnectionStatus();
+  onWiFiConnectionChanged(false);
+  scheduleNextWiFiAttempt(reason);
+}
+
+void updateWiFiConnection()
+{
+  if (appState.isFirstBoot || appState.wifiSSID.length() == 0)
+  {
+    setupAccessPointMode();
+    return;
+  }
+
+  wl_status_t status = WiFi.status();
+
+  if (status == WL_CONNECTED)
+  {
+    if (!appState.wifiConnected)
+    {
+      onWiFiConnected();
+    }
+    return;
+  }
+
+  if (appState.wifiConnected)
+  {
+    Serial.println("[WiFi] Connection lost");
+    onWiFiDisconnected("connection lost");
+    return;
+  }
+
+  if (!wifiConnectInProgress)
+  {
+    startWiFiConnectAttempt();
+    return;
+  }
+
+  if (millis() - wifiAttemptStartedAt > WIFI_CONNECT_TIMEOUT_MS)
+  {
+    Serial.println("[WiFi] Connect timeout");
+    appState.isDataLoading = false;
+    updateConnectionStatus();
+    WiFi.disconnect(false, true);
+    wifiConnectInProgress = false;
+    scheduleNextWiFiAttempt("connect timeout");
+  }
+}
+
+static bool isStartupSyncReady()
+{
+  return appState.timeValid && weatherData.lastUpdate > 0;
+}
+
+static void tryFinishStartupScreen()
+{
+  if (!startupWaitingForSync || !isStartupSyncReady())
+  {
+    return;
+  }
+
+  if (xSemaphoreTake(uiMutex, (TickType_t)10) != pdTRUE)
+  {
+    return;
+  }
+
+  updateTimeDisplay();
+  updateWeatherDisplay();
+  updateConnectionStatus();
+
+  if (ui_Screen1)
+  {
+    lv_scr_load_anim(ui_Screen1, LV_SCR_LOAD_ANIM_FADE_ON, 500, 0, false);
+  }
+  appState.currentScreen = SCREEN_1;
+  startAnimation();
+  startupWaitingForSync = false;
+  xSemaphoreGive(uiMutex);
+
+  Serial.println("[UI] Screen5 finished: time and weather synced");
 }
 
 void setup()
@@ -394,14 +515,10 @@ void setup()
   initLeds();
   initBusSchedule();
   initWeather();
+  initOtaManager();
 
   // Подключаемся к WiFi (здесь будет пауза до 10 сек, пока висит Screen5)
-  connectWiFi();
-
-  if (appState.wifiConnected)
-  {
-    updateWeather();
-  }
+  updateWiFiConnection();
 
   initWebSocketClient();
 
@@ -431,18 +548,18 @@ void setup()
 
     // === ПЕРЕХОД НА ОСНОВНОЙ ЭКРАН (Screen 1) ===
     // Делаем это с небольшой задержкой или анимацией, чтобы пользователь успел увидеть Splash
-    if (!appState.isFirstBoot)
-    {
-      delay(500);
-      if (ui_Screen1)
-      {
-        lv_scr_load_anim(ui_Screen1, LV_SCR_LOAD_ANIM_FADE_ON, 500, 0, false);
-      }
-    }
+    xSemaphoreGive(uiMutex);
+  }
+
+  if (!appState.isFirstBoot)
+  {
+    startupWaitingForSync = true;
+    Serial.println("[UI] Screen5 active: waiting for time+weather sync");
+  }
+  else
+  {
     appState.currentScreen = SCREEN_1;
     startAnimation();
-
-    xSemaphoreGive(uiMutex);
   }
 
   // Запуск фоновых задач
@@ -454,23 +571,18 @@ void setup()
 
 void loop()
 {
-  handleButtonPress();
+  updateWiFiConnection();
   updateWebSocketClient();
-  if (!appState.wifiConnected)
-  {
-    static unsigned long lastRetry = 0;
+  updateOtaManager();
+  tryFinishStartupScreen();
 
-    if (millis() - lastRetry > 10000)
-    {
-      connectWiFi();
-      lastRetry = millis();
-    }
+  if (!startupWaitingForSync)
+  {
+    handleButtonPress();
   }
 
   if (webServerRunning)
     server.handleClient();
-  if (appState.wifiConnected)
-    ArduinoOTA.handle();
 
   static unsigned long lastAutoUpdate = 0;
   if (millis() - lastAutoUpdate > 1000)
@@ -486,7 +598,7 @@ void loop()
 
   // Обновляем экраны (UI логику), защищая мьютексом
   static unsigned long lastUiUpdate = 0;
-  if (millis() - lastUiUpdate > 500)
+  if (!startupWaitingForSync && millis() - lastUiUpdate > 500)
   { // Обновляем текст раз в полсекунды
     if (xSemaphoreTake(uiMutex, (TickType_t)10) == pdTRUE)
     {

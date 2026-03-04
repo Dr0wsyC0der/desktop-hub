@@ -10,6 +10,8 @@
 #define BACKLIGHT_PIN 3
 
 Preferences preferences;
+static bool sleepScreenPreviewActive = false;
+static unsigned long sleepScreenPreviewUntil = 0;
 static float smoothedFactor = -1.0f; // -1 = не инициализирован
 
 void initDeviceControl()
@@ -164,9 +166,43 @@ void updateAutoBrightness()
     }
 }
 
+void triggerSleepScreenPreview(unsigned long durationMs)
+{
+    if (!appState.sleepEnabled || !appState.isSleepingNow)
+        return;
+
+    sleepScreenPreviewActive = true;
+    sleepScreenPreviewUntil = millis() + durationMs;
+    ledcWrite(0, appState.screenBrightness);
+    Serial.printf("[Sleep] Screen preview for %lu ms\n", durationMs);
+}
+
 void updateSleepMode()
 {
-    if (!appState.sleepEnabled || !appState.timeValid)
+    if (appState.isSleepingNow && sleepScreenPreviewActive)
+    {
+        if ((long)(millis() - sleepScreenPreviewUntil) >= 0)
+        {
+            ledcWrite(0, 0);
+            sleepScreenPreviewActive = false;
+            Serial.println("[Sleep] Screen preview ended");
+        }
+    }
+
+    if (!appState.sleepEnabled)
+    {
+        if (appState.isSleepingNow)
+        {
+            Serial.println("[Sleep] Sleep disabled, waking up");
+            appState.isSleepingNow = false;
+            sleepScreenPreviewActive = false;
+            setScreenBrightness(appState.screenBrightness);
+            setLedBrightness(appState.ledBrightness);
+        }
+        return;
+    }
+
+    if (!appState.timeValid)
         return;
 
     struct tm timeinfo;
@@ -193,6 +229,7 @@ void updateSleepMode()
     {
         Serial.println("[Sleep] Entering sleep mode");
         appState.isSleepingNow = true;
+        sleepScreenPreviewActive = false;
 
         ledcWrite(0, 0); // гасим экран напрямую
         FastLED.setBrightness(0);
@@ -202,14 +239,9 @@ void updateSleepMode()
     {
         Serial.println("[Sleep] Leaving sleep mode");
         appState.isSleepingNow = false;
+        sleepScreenPreviewActive = false;
 
-        // Восстанавливаем: если автояркость — она сама обновится в следующем цикле,
-        // если ручная — ставим сохранённые значения
-        if (!appState.autoBrightness)
-        {
-            setScreenBrightness(appState.screenBrightness);
-            setLedBrightness(appState.ledBrightness);
-        }
-        // else: smoothedFactor уже актуален, updateAutoBrightness сам применит значения
+        setScreenBrightness(appState.screenBrightness);
+        setLedBrightness(appState.ledBrightness);
     }
 }

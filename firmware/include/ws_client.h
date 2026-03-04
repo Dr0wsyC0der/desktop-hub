@@ -9,5 +9,6 @@ void sendWebSocketMessage(const String &message);
 bool isWebSocketConnected();
 void reconnectWebSocket();
 void forceWebSocketReconnect();
+void onWiFiConnectionChanged(bool connected);
 
 #endif

@@ -6,6 +6,28 @@
 #include <ui.h>
 #include "helpers.h"
 
+static bool isNightBySunTimes(long nowUtc, long sunriseUtc, long sunsetUtc)
+{
+    if (nowUtc <= 0 || sunriseUtc <= 0 || sunsetUtc <= 0 || sunsetUtc <= sunriseUtc)
+    {
+        return false;
+    }
+
+    return nowUtc < sunriseUtc || nowUtc >= sunsetUtc;
+}
+
+static bool isFogCondition(const String &mainCondition, const String &description, int weatherId)
+{
+    if (weatherId == 741 || mainCondition == "Fog" || mainCondition == "Mist" || mainCondition == "Haze")
+    {
+        return true;
+    }
+
+    String desc = description;
+    desc.toLowerCase();
+    return desc.indexOf("fog") >= 0 || desc.indexOf("mist") >= 0 || desc.indexOf("haze") >= 0;
+}
+
 void initWeather()
 {
 }
@@ -52,6 +74,16 @@ void updateWeather()
         String mainCondition = doc["weather"][0]["main"] | "";
         String description = doc["weather"][0]["description"] | "";
         int weatherId = doc["weather"][0]["id"] | 0;
+        long sunriseUtc = doc["sys"]["sunrise"] | 0;
+        long sunsetUtc = doc["sys"]["sunset"] | 0;
+        long nowUtc = doc["dt"] | 0;
+
+        if (nowUtc <= 0)
+        {
+            nowUtc = time(nullptr);
+        }
+
+        bool isNight = isNightBySunTimes(nowUtc, sunriseUtc, sunsetUtc);
 
         if (!appState.timeValid)
         {
@@ -59,22 +91,26 @@ void updateWeather()
             setupTimeFromOffset(timezoneOffset);
         }
 
-        if (mainCondition == "Clear")
+        if (isFogCondition(mainCondition, description, weatherId))
         {
-            weatherData.condition = "sunny";
+            weatherData.condition = "fog";
+        }
+        else if (mainCondition == "Clear")
+        {
+            weatherData.condition = isNight ? "clear" : "sunny";
         }
         else if (mainCondition == "Clouds")
         {
             if (weatherId >= 801 && weatherId <= 802)
             {
-                weatherData.condition = "partly clowdy";
+                weatherData.condition = "partly cloudy";
             }
             else
             {
-                weatherData.condition = "clowdy";
+                weatherData.condition = "cloudy";
             }
         }
-        else if (mainCondition == "Rain")
+        else if (mainCondition == "Rain" || mainCondition == "Drizzle")
         {
             if (description.indexOf("snow") >= 0 || weatherId >= 600)
             {
@@ -95,7 +131,7 @@ void updateWeather()
         }
         else
         {
-            weatherData.condition = "clowdy";
+            weatherData.condition = "cloudy";
         }
 
         weatherData.localIP = WiFi.localIP().toString();
@@ -148,24 +184,30 @@ void updateWeatherDisplay()
         weatherImg = ui_snowy;
     else if (weatherData.condition == "rainy")
         weatherImg = ui_rainy;
-    else if (weatherData.condition == "clowdy")
-        weatherImg = ui_clowdy;
+    else if (weatherData.condition == "cloudy")
+        weatherImg = ui_cloudy;
     else if (weatherData.condition == "storm")
         weatherImg = ui_storm;
-    else if (weatherData.condition == "partly clowdy")
-        weatherImg = ui_partly_clowdly;
+    else if (weatherData.condition == "partly cloudy")
+        weatherImg = ui_partly_cloudy;
     else if (weatherData.condition == "snow and rain")
         weatherImg = ui_snow_and_rain;
+    else if (weatherData.condition == "clear")
+        weatherImg = ui_moon;
+    else if (weatherData.condition == "fog")
+        weatherImg = ui_fog;
 
     if (weatherImg && ui_weather_img)
     {
         lv_obj_add_flag(ui_sunny, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(ui_snowy, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(ui_rainy, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(ui_clowdy, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ui_cloudy, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(ui_storm, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(ui_partly_clowdly, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ui_partly_cloudy, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(ui_snow_and_rain, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ui_moon, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ui_fog, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(weatherImg, LV_OBJ_FLAG_HIDDEN);
     }
 

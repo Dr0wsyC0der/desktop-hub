@@ -378,14 +378,21 @@ void handleButtonPress()
     {
         if (clickCount == 1)
         {
-            if (appState.currentScreen == SCREEN_1)
-                switchScreen(SCREEN_3);
-            else if (appState.currentScreen == SCREEN_3)
-                switchScreen(SCREEN_4);
-            else if (appState.currentScreen == SCREEN_4)
-                switchScreen(SCREEN_6);
+            if (appState.sleepEnabled && appState.isSleepingNow)
+            {
+                triggerSleepScreenPreview(5000);
+            }
             else
-                switchScreen(SCREEN_1);
+            {
+                if (appState.currentScreen == SCREEN_1)
+                    switchScreen(SCREEN_3);
+                else if (appState.currentScreen == SCREEN_3)
+                    switchScreen(SCREEN_4);
+                else if (appState.currentScreen == SCREEN_4)
+                    switchScreen(SCREEN_6);
+                else
+                    switchScreen(SCREEN_1);
+            }
         }
         else if (clickCount == 2)
         {
@@ -780,13 +787,22 @@ void handleScreen7Timeout()
 static lv_obj_t *gif_canvas = nullptr;
 static uint8_t *canvas_buffer = nullptr;
 static lv_color_t *frame_buffer = nullptr;
+static File anim_playback_file;
+static bool anim_playback_opened = false;
+
+static void closeAnimPlaybackFile()
+{
+    if (anim_playback_opened)
+    {
+        anim_playback_file.close();
+        anim_playback_opened = false;
+    }
+}
 
 void anim_timer_cb(lv_timer_t *t)
 {
     if (appState.currentScreen != SCREEN_1)
         return;
-    static File anim_file;
-    static bool file_opened = false;
 
     if (appState.animReceiving)
         return;
@@ -795,12 +811,12 @@ void anim_timer_cb(lv_timer_t *t)
     if (frameSize == 0)
         return;
 
-    if (!file_opened)
+    if (!anim_playback_opened)
     {
-        anim_file = LittleFS.open("/anim.bin", "r");
-        if (!anim_file)
+        anim_playback_file = LittleFS.open("/anim.bin", "r");
+        if (!anim_playback_file)
             return;
-        file_opened = true;
+        anim_playback_opened = true;
     }
 
     if (!frame_buffer)
@@ -808,8 +824,7 @@ void anim_timer_cb(lv_timer_t *t)
         frame_buffer = (lv_color_t *)malloc(frameSize);
         if (!frame_buffer)
         {
-            anim_file.close();
-            file_opened = false;
+            closeAnimPlaybackFile();
             return;
         }
     }
@@ -817,16 +832,15 @@ void anim_timer_cb(lv_timer_t *t)
     if (current_anim_frame >= appState.animFrames)
     {
         current_anim_frame = 0;
-        anim_file.seek(0);
+        anim_playback_file.seek(0);
     }
 
     // Читаем напрямую в буфер canvas
-    size_t bytesRead = anim_file.read((uint8_t *)frame_buffer, frameSize);
+    size_t bytesRead = anim_playback_file.read((uint8_t *)frame_buffer, frameSize);
 
     if (bytesRead != frameSize)
     {
-        anim_file.close();
-        file_opened = false;
+        closeAnimPlaybackFile();
         current_anim_frame = 0;
         return;
     }
@@ -864,11 +878,18 @@ void startAnimation()
         lv_timer_del(animTimer);
         animTimer = nullptr;
     }
+    closeAnimPlaybackFile();
 
     if (frame_buffer)
     {
         free(frame_buffer);
         frame_buffer = nullptr;
+    }
+
+    if (canvas_buffer)
+    {
+        free(canvas_buffer);
+        canvas_buffer = nullptr;
     }
 
     current_anim_frame = 0;
@@ -934,6 +955,7 @@ void stopAnimation()
         lv_timer_del(animTimer);
         animTimer = nullptr;
     }
+    closeAnimPlaybackFile();
 
     if (frame_buffer)
     {

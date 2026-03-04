@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import json
+import re
+from copy import deepcopy
 from datetime import date, datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
@@ -13,10 +15,52 @@ from .gif_codec import build_rgb565_from_gif
 from ..core.alive_services import AppContext
 
 
+DEFAULT_STORED_SETTINGS = {
+    "wifi": {"ssid": "", "password": ""},
+    "weather": {
+        "api_key": "",
+        "latitude": "55.7558",
+        "longitude": "37.6173",
+        "timeout_sec": 1800,
+    },
+    "display": {
+        "brightness": 180,
+        "weather_dependent": False,
+        "off_time": "23:00",
+        "on_time": "07:00",
+        "accent_color": "#FFAA00",
+    },
+    "backlight": {
+        "brightness": 180,
+        "mode": "5",
+        "led_mode": 5,
+        "weather_dependent": False,
+        "color": "#33CCFF",
+    },
+    "schedule": {
+        "start_time": "07:30",
+        "end_time": "19:30",
+        "sources": [
+            {"url": "", "stop_name": "", "bus_number": ""},
+            {"url": "", "stop_name": "", "bus_number": ""},
+            {"url": "", "stop_name": "", "bus_number": ""},
+            {"url": "", "stop_name": "", "bus_number": ""},
+        ],
+    },
+    "ota": {"url": "", "firmware_path": ""},
+    "network": {"ws_port": 8765, "udp_port": 45678},
+    "ui_colors": {},
+}
+HEX_COLOR_RE = re.compile(r"^#?[0-9A-Fa-f]{6}$")
+
+
 class ESPService:
+    SETTINGS_PATH = Path("backend/storage/settings.json")
+
     def __init__(self, bus):
         self.bus = bus
-        self.conn = ESPConnection()
+        ws_port, udp_port = self._load_network_ports()
+        self.conn = ESPConnection(port=ws_port, udp_port=udp_port)
         self.last_message = None
         self._gif_lock = asyncio.Lock()
         self._gif_assets_dirs = [
@@ -32,13 +76,68 @@ class ESPService:
         self._pc_load_task: Optional[asyncio.Task] = None
         self._pc_load_running: bool = False
 
+    def _load_network_ports(self) -> tuple[int, int]:
+        ws_port = 8765
+        udp_port = 45678
+
+        if not self.SETTINGS_PATH.exists():
+            return ws_port, udp_port
+
+        try:
+            with open(self.SETTINGS_PATH, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+        except Exception:
+            return ws_port, udp_port
+
+        network = settings.get("network", {})
+        try:
+            ws_port = int(network.get("ws_port", ws_port))
+        except (TypeError, ValueError):
+            ws_port = 8765
+        try:
+            udp_port = int(network.get("udp_port", udp_port))
+        except (TypeError, ValueError):
+            udp_port = 45678
+
+        ws_port = max(1, min(65535, ws_port))
+        udp_port = max(1, min(65535, udp_port))
+        return ws_port, udp_port
+
     async def start(self):
         # Передаём обработчик входящих сообщений в соединение
-        await self.conn.start(self.on_message)
+        await self.conn.start(self.on_message, self._on_connect)
 
         self.bus.subscribe("volume_changed", self.on_volume)
         self.bus.subscribe("track_changed", self.on_track)
-        self.bus.subscribe("big_system_load", self.on_load)
+
+    async def _on_connect(self):
+        settings = self._load_saved_settings()
+        await self.send_all_settings(settings)
+        await self.send_saved_interface_colors(settings)
+
+    def _load_saved_settings(self) -> dict:
+        settings = deepcopy(DEFAULT_STORED_SETTINGS)
+        if not self.SETTINGS_PATH.exists():
+            return settings
+
+        try:
+            with open(self.SETTINGS_PATH, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+        except Exception:
+            return settings
+
+        if not isinstance(loaded, dict):
+            return settings
+
+        return self._deep_merge(settings, loaded)
+
+    def _deep_merge(self, base: dict, patch: dict) -> dict:
+        for key, value in patch.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                base[key] = self._deep_merge(base[key], value)
+            else:
+                base[key] = value
+        return base
 
     async def on_message(self, raw_msg: str):
         """
@@ -170,20 +269,20 @@ class ESPService:
         )
 
     async def send_display_settings(self, payload: dict):
-        brightness_pct = self._percent(payload.get("brightness", 70))
+        brightness_raw = self._brightness_byte(payload.get("brightness", 180))
         command = {
             "type": "settings",
-            "screen_brightness": self._to_byte(brightness_pct),
+            "screen_brightness": brightness_raw,
             "auto_brightness": bool(payload.get("weather_dependent", payload.get("auto_brightness", False))),
         }
 
         if "weather_brightness" in payload:
-            command["screen_weather_brightness"] = self._to_byte(payload.get("weather_brightness", brightness_pct))
+            command["screen_weather_brightness"] = self._brightness_byte(payload.get("weather_brightness", brightness_raw))
 
         await self.conn.broadcast_json(command)
 
     async def send_backlight_settings(self, payload: dict):
-        brightness_pct = self._percent(payload.get("brightness", payload.get("backlight", 70)))
+        brightness_raw = self._brightness_byte(payload.get("brightness", payload.get("backlight", 180)))
         led_mode = payload.get("led_mode", payload.get("mode", 5))
         try:
             led_mode = int(led_mode)
@@ -192,7 +291,7 @@ class ESPService:
 
         command = {
             "type": "settings",
-            "led_brightness": self._to_byte(brightness_pct),
+            "led_brightness": brightness_raw,
             "led_mode": max(1, min(7, led_mode)),
             "led_weather_dependent": bool(payload.get("weather_dependent", False)),
         }
@@ -202,8 +301,21 @@ class ESPService:
             command["led_color"] = str(color)
 
         if "weather_brightness" in payload:
-            command["led_weather_brightness"] = self._to_byte(payload.get("weather_brightness", brightness_pct))
+            command["led_weather_brightness"] = self._brightness_byte(payload.get("weather_brightness", brightness_raw))
 
+        await self.conn.broadcast_json(command)
+
+    async def send_settings_patch(self, patch: dict):
+        if not isinstance(patch, dict):
+            return
+
+        compact_patch = {k: v for k, v in patch.items() if v is not None}
+        if not compact_patch:
+            return
+
+        command = {"type": "settings"}
+        command.update(compact_patch)
+        print(f"[ESP] send_settings_patch -> {command}")
         await self.conn.broadcast_json(command)
 
     async def send_all_settings(self, settings: dict):
@@ -220,6 +332,29 @@ class ESPService:
         backlight_payload = settings.get("backlight")
         if isinstance(backlight_payload, dict):
             await self.send_backlight_settings(backlight_payload)
+
+    async def send_saved_interface_colors(self, settings: dict):
+        ui_colors = settings.get("ui_colors", {})
+        if not isinstance(ui_colors, dict):
+            return
+
+        sent_count = 0
+        for screen_name, elements in ui_colors.items():
+            screen = str(screen_name or "").strip()
+            if not screen or not isinstance(elements, dict):
+                continue
+
+            for element_name, color_raw in elements.items():
+                element = str(element_name or "").strip()
+                color = self._normalize_hex_color(color_raw)
+                if not element or not color:
+                    continue
+
+                await self.send_color(screen=screen, element=element, color=color)
+                sent_count += 1
+
+        if sent_count:
+            print(f"[ESP] reapplied saved interface colors: {sent_count}")
 
     async def send_ota_command(self, firmware_path: str):
         path = Path(firmware_path)
@@ -252,8 +387,8 @@ class ESPService:
         width: int = 80,
         height: int = 80,
         delay_ms: int = 200,
-        chunk_size: int = 1460,
-        chunk_delay_sec: float = 0.03,
+        chunk_size: int = 1024,
+        chunk_delay_sec: float = 0.05,
         progress_cb: Optional[Callable[[str, int, str], Awaitable[None]]] = None,
     ):
         async with self._gif_lock:
@@ -339,21 +474,25 @@ class ESPService:
         })
 
 
-    def _percent(self, value: int | float | str) -> int:
+    def _brightness_byte(self, value: int | float | str) -> int:
         try:
             number = int(float(value))
         except (TypeError, ValueError):
-            number = 70
-        return max(0, min(number, 100))
+            number = 180
 
-    def _to_byte(self, value: int | float | str) -> int:
-        return max(0, min(255, round(self._percent(value) * 255 / 100)))
+        return max(0, min(255, number))
+
+    def _normalize_hex_color(self, value: object) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        if not HEX_COLOR_RE.fullmatch(raw):
+            return ""
+        prefixed = raw if raw.startswith("#") else f"#{raw}"
+        return prefixed.upper()
 
     def is_connected(self) -> bool:
         return len(self.conn.clients) > 0
-
-    async def on_load(self, event):
-        await self.send("system_load", event)
 
     async def _send_schedule(self, schedule_data: dict):
         """
@@ -365,10 +504,4 @@ class ESPService:
             "payload": schedule_data
         })
 
-    async def send(self, name, payload):
-        await self.conn.broadcast({
-            "type": "event",
-            "name": name,
-            "payload": payload
-        })
 

@@ -96,6 +96,7 @@ struct AppState
     float weatherLat = 0.0;
     float weatherLon = 0.0;
     bool useCoordinates = false;
+    int weatherTimeoutSec = 600;
 };
 
 struct WeatherData

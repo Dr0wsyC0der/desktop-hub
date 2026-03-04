@@ -6,14 +6,118 @@
 #include "helpers.h"
 #include "led_effects.h"
 #include "weather.h"
+#include "ota_manager.h"
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <HTTPClient.h>
-#include <Update.h>
-#include <WiFi.h>
 #include <ui.h>
 #include "ws_client.h"
 #include <Preferences.h>
+#include <math.h>
+#include <stdlib.h>
+
+namespace
+{
+    bool otaCallbackRegistered = false;
+
+    bool parseLedColorValue(JsonVariantConst value, uint32_t &outColor)
+    {
+        if (value.is<const char *>())
+        {
+            String color = value.as<String>();
+            color.trim();
+
+            if (color.startsWith("#"))
+            {
+                color.remove(0, 1);
+            }
+            else if (color.startsWith("0x") || color.startsWith("0X"))
+            {
+                color.remove(0, 2);
+            }
+
+            if (color.length() != 6)
+            {
+                return false;
+            }
+
+            char *end = nullptr;
+            unsigned long parsed = strtoul(color.c_str(), &end, 16);
+            if (end == color.c_str() || *end != '\0')
+            {
+                return false;
+            }
+
+            outColor = parsed & 0xFFFFFF;
+            return true;
+        }
+
+        if (value.is<uint32_t>() || value.is<unsigned long>() || value.is<int>())
+        {
+            outColor = value.as<uint32_t>() & 0xFFFFFF;
+            return true;
+        }
+
+        return false;
+    }
+
+    bool parseFloatValue(JsonVariantConst value, float &outValue)
+    {
+        if (value.is<float>() || value.is<double>() || value.is<int>() || value.is<long>())
+        {
+            outValue = value.as<float>();
+            return true;
+        }
+
+        if (value.is<const char *>())
+        {
+            String raw = value.as<String>();
+            raw.trim();
+            if (raw.length() == 0)
+            {
+                return false;
+            }
+
+            char *end = nullptr;
+            float parsed = strtof(raw.c_str(), &end);
+            if (end == raw.c_str() || *end != '\0')
+            {
+                return false;
+            }
+
+            outValue = parsed;
+            return true;
+        }
+
+        return false;
+    }
+
+    bool tryParseFloatFromKey(JsonDocument &doc, const char *key, float &outValue)
+    {
+        if (!doc.containsKey(key))
+        {
+            return false;
+        }
+        return parseFloatValue(doc[key], outValue);
+    }
+
+    void onOtaEvent(int progress, const char *stage, const char *message)
+    {
+        DynamicJsonDocument response(256);
+        response["type"] = "ota_status";
+        response["stage"] = stage;
+        response["progress"] = progress;
+
+        if (message && message[0] != '\0')
+        {
+            response["message"] = message;
+        }
+
+        String out;
+        serializeJson(response, out);
+        sendWebSocketMessage(out);
+    }
+}
 
 void processWebSocketMessage(const String &message)
 {
@@ -101,6 +205,10 @@ void processJSONCommand(JsonDocument &doc)
     {
         handleSettingsCommand(doc);
     }
+    else if (type == "led" || type == "led_state" || type == "lighting")
+    {
+        handleLedStateCommand(doc);
+    }
     else if (type == "ota")
     {
         handleOtaCommand(doc);
@@ -117,12 +225,8 @@ void processJSONCommand(JsonDocument &doc)
     }
     else if (type == "set_gif")
     {
-        // 1. ОСТАНАВЛИВАЕМ ТАЙМЕР И ОСВОБОЖДАЕМ ФАЙЛ
-        if (animTimer)
-        {
-            lv_timer_del(animTimer);
-            animTimer = nullptr;
-        }
+        // 1. ОСТАНАВЛИВАЕМ ПЛЕЙБЕК, ЧТОБЫ ОСВОБОДИТЬ /anim.bin
+        stopAnimation();
 
         if (animFile)
         {
@@ -151,6 +255,19 @@ void processJSONCommand(JsonDocument &doc)
         // RGB565 = 2 байта на пиксель
         appState.animFrameSize = appState.animWidth * appState.animHeight * 2;
         appState.animReceivedBytes = 0;
+
+        if (appState.animFrames <= 0 || appState.animWidth <= 0 || appState.animHeight <= 0 || appState.animTotalSize == 0)
+        {
+            Serial.printf("[Anim] Invalid metadata: frames=%d size=%dx%d total=%u\n",
+                          appState.animFrames,
+                          appState.animWidth,
+                          appState.animHeight,
+                          appState.animTotalSize);
+            appState.animReceiving = false;
+            appState.isDataLoading = false;
+            updateConnectionStatus();
+            return;
+        }
 
         Serial.printf("[Anim] Start: %d frames, %dx%d, total %d bytes\n",
                       appState.animFrames, appState.animWidth, appState.animHeight, appState.animTotalSize);
@@ -393,6 +510,14 @@ void handleSetColorCommand(JsonDocument &doc)
 
 void handleSettingsCommand(JsonDocument &doc)
 {
+    bool sleepSettingsUpdated = false;
+    bool weatherSettingsChanged = false;
+    bool weatherApiChanged = false;
+    bool weatherLocationChanged = false;
+    bool weatherUseCoordsChanged = false;
+    bool weatherTimeoutChanged = false;
+    bool weatherShouldRefreshNow = false;
+
     if (doc.containsKey("screen_brightness"))
     {
         if (!appState.autoBrightness)
@@ -431,6 +556,15 @@ void handleSettingsCommand(JsonDocument &doc)
             setLedBrightness(appState.ledBrightness);
         }
     }
+    if (doc.containsKey("led_color") || doc.containsKey("color"))
+    {
+        uint32_t color = 0;
+        JsonVariantConst colorValue = doc.containsKey("led_color") ? doc["led_color"] : doc["color"];
+        if (parseLedColorValue(colorValue, color))
+        {
+            setLedColor(color);
+        }
+    }
     if (doc.containsKey("auto_gamma"))
         appState.autoBrightnessGamma = doc["auto_gamma"];
 
@@ -444,35 +578,182 @@ void handleSettingsCommand(JsonDocument &doc)
     if (doc.containsKey("auto_led_max"))
         appState.autoLedMax = doc["auto_led_max"];
     if (doc.containsKey("sleep_enabled"))
-        appState.sleepEnabled = doc["sleep_enabled"];
-
-    if (doc.containsKey("sleep_start_hour"))
-        appState.sleepStartHour = doc["sleep_start_hour"];
-
-    if (doc.containsKey("sleep_start_minute"))
-        appState.sleepStartMinute = doc["sleep_start_minute"];
-
-    if (doc.containsKey("sleep_end_hour"))
-        appState.sleepEndHour = doc["sleep_end_hour"];
-
-    if (doc.containsKey("sleep_end_minute"))
-        appState.sleepEndMinute = doc["sleep_end_minute"];
-    if (doc.containsKey("weather_lat") && doc.containsKey("weather_lon"))
     {
-        appState.weatherLat = doc["weather_lat"];
-        appState.weatherLon = doc["weather_lon"];
-        appState.useCoordinates = true;
+        appState.sleepEnabled = doc["sleep_enabled"];
+        sleepSettingsUpdated = true;
     }
 
-    if (doc.containsKey("weather_lat") && doc.containsKey("weather_lon"))
+    if (doc.containsKey("sleep_start_hour"))
     {
-        updateWeather();
+        appState.sleepStartHour = doc["sleep_start_hour"];
+        sleepSettingsUpdated = true;
+    }
 
-        if (xSemaphoreTake(uiMutex, portMAX_DELAY) == pdTRUE)
+    if (doc.containsKey("sleep_start_minute"))
+    {
+        appState.sleepStartMinute = doc["sleep_start_minute"];
+        sleepSettingsUpdated = true;
+    }
+
+    if (doc.containsKey("sleep_end_hour"))
+    {
+        appState.sleepEndHour = doc["sleep_end_hour"];
+        sleepSettingsUpdated = true;
+    }
+
+    if (doc.containsKey("sleep_end_minute"))
+    {
+        appState.sleepEndMinute = doc["sleep_end_minute"];
+        sleepSettingsUpdated = true;
+    }
+
+    float incomingLat = appState.weatherLat;
+    float incomingLon = appState.weatherLon;
+    bool hasLat = tryParseFloatFromKey(doc, "weather_lat", incomingLat) ||
+                  tryParseFloatFromKey(doc, "latitude", incomingLat) ||
+                  tryParseFloatFromKey(doc, "lat", incomingLat);
+    bool hasLon = tryParseFloatFromKey(doc, "weather_lon", incomingLon) ||
+                  tryParseFloatFromKey(doc, "longitude", incomingLon) ||
+                  tryParseFloatFromKey(doc, "lon", incomingLon);
+
+    if (hasLat && fabsf(incomingLat - appState.weatherLat) > 0.0001f)
+    {
+        appState.weatherLat = incomingLat;
+        weatherSettingsChanged = true;
+        weatherLocationChanged = true;
+        weatherShouldRefreshNow = true;
+    }
+    if (hasLon && fabsf(incomingLon - appState.weatherLon) > 0.0001f)
+    {
+        appState.weatherLon = incomingLon;
+        weatherSettingsChanged = true;
+        weatherLocationChanged = true;
+        weatherShouldRefreshNow = true;
+    }
+
+    if (doc.containsKey("weather_api_key"))
+    {
+        String incomingKey = doc["weather_api_key"] | "";
+        if (incomingKey != appState.openWeatherAPIKey)
         {
-            updateWeatherDisplay();
-            xSemaphoreGive(uiMutex);
+            appState.openWeatherAPIKey = incomingKey;
+            weatherSettingsChanged = true;
+            weatherApiChanged = true;
+            weatherShouldRefreshNow = true;
         }
+    }
+
+    if (doc.containsKey("weather_timeout_sec"))
+    {
+        int incomingTimeout = constrain((int)(doc["weather_timeout_sec"] | appState.weatherTimeoutSec), 60, 86400);
+        if (incomingTimeout != appState.weatherTimeoutSec)
+        {
+            appState.weatherTimeoutSec = incomingTimeout;
+            weatherSettingsChanged = true;
+            weatherTimeoutChanged = true;
+        }
+    }
+
+    if ((hasLat || hasLon) && !appState.useCoordinates)
+    {
+        appState.useCoordinates = true;
+        weatherSettingsChanged = true;
+        weatherUseCoordsChanged = true;
+        weatherShouldRefreshNow = true;
+    }
+
+    if (sleepSettingsUpdated)
+    {
+        updateSleepMode();
+    }
+
+    if (weatherSettingsChanged)
+    {
+        Preferences prefs;
+        prefs.begin("deskhub", false);
+        if (weatherApiChanged)
+            prefs.putString("weatherKey", appState.openWeatherAPIKey);
+        if (weatherLocationChanged)
+        {
+            prefs.putFloat("weatherLat", appState.weatherLat);
+            prefs.putFloat("weatherLon", appState.weatherLon);
+        }
+        if (weatherUseCoordsChanged)
+            prefs.putBool("useCoords", appState.useCoordinates);
+        if (weatherTimeoutChanged)
+            prefs.putUInt("weatherTimeoutSec", (uint32_t)appState.weatherTimeoutSec);
+        prefs.end();
+
+        if (weatherShouldRefreshNow)
+        {
+            Serial.println("[Weather] Settings changed, refreshing weather now");
+            updateWeather();
+            if (xSemaphoreTake(uiMutex, portMAX_DELAY) == pdTRUE)
+            {
+                updateWeatherDisplay();
+                xSemaphoreGive(uiMutex);
+            }
+        }
+    }
+
+    saveSettings();
+}
+
+void handleLedStateCommand(JsonDocument &doc)
+{
+    int mode = -1;
+    int brightness = -1;
+    uint32_t color = 0;
+    bool hasColor = false;
+
+    if (doc.containsKey("mode"))
+    {
+        mode = doc["mode"];
+    }
+    else if (doc.containsKey("led_mode"))
+    {
+        mode = doc["led_mode"];
+    }
+
+    if (doc.containsKey("brightness"))
+    {
+        brightness = doc["brightness"];
+    }
+    else if (doc.containsKey("led_brightness"))
+    {
+        brightness = doc["led_brightness"];
+    }
+
+    if (doc.containsKey("color"))
+    {
+        hasColor = parseLedColorValue(doc["color"], color);
+    }
+    else if (doc.containsKey("led_color"))
+    {
+        hasColor = parseLedColorValue(doc["led_color"], color);
+    }
+
+    if (mode >= LED_MODE_STATIC && mode <= LED_MODE_MATRIX)
+    {
+        appState.defaultLedMode = mode;
+        if (!appState.volumeModeActive)
+        {
+            setLedMode(mode);
+        }
+    }
+
+    if (brightness >= 0)
+    {
+        appState.ledBrightness = constrain(brightness, 0, 255);
+        if (!appState.autoBrightness)
+        {
+            setLedBrightness(appState.ledBrightness);
+        }
+    }
+
+    if (hasColor)
+    {
+        setLedColor(color);
     }
 
     saveSettings();
@@ -480,37 +761,22 @@ void handleSettingsCommand(JsonDocument &doc)
 
 void handleOtaCommand(JsonDocument &doc)
 {
-    String url = doc["url"] | "";
-    if (url.length() == 0)
-        return;
-
-    HTTPClient http;
-    http.begin(url);
-    int httpCode = http.GET();
-    if (httpCode == HTTP_CODE_OK)
+    if (!otaCallbackRegistered)
     {
-        int contentLength = http.getSize();
-        if (contentLength > 0)
-        {
-            Update.begin(contentLength);
-            WiFiClient *stream = http.getStreamPtr();
-            uint8_t buff[64] = {0};
-            int len = stream->available();
-            while (len > 0)
-            {
-                size_t bytesToRead = (len > 128) ? 128 : len;
-                stream->readBytes(buff, bytesToRead);
-                Update.write(buff, bytesToRead);
-                len = stream->available();
-            }
-            if (Update.end())
-            {
-                Serial.println("OTA Update successful!");
-                ESP.restart();
-            }
-        }
+        setOtaEventCallback(onOtaEvent);
+        otaCallbackRegistered = true;
     }
-    http.end();
+
+    String url = doc["url"] | "";
+    String md5 = doc["md5"] | "";
+
+    if (url.length() == 0)
+    {
+        onOtaEvent(0, "error", "missing url");
+        return;
+    }
+
+    requestOtaUpdate(url, md5);
 }
 
 void handleGifCommand(JsonDocument &doc)
