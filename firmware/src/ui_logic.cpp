@@ -408,9 +408,11 @@ void handleButtonPress()
         else if (clickCount >= 3)
         {
             appState.ledMode++;
-            if (appState.ledMode > 7)
+            if (appState.ledMode > LED_MODE_PRISM)
                 appState.ledMode = 1;
             setLedMode(appState.ledMode);
+            appState.defaultLedMode = appState.ledMode;
+            saveSettings();
             Serial.printf("[LED] New Mode: %d\n", appState.ledMode);
         }
 
@@ -490,7 +492,10 @@ void updateScreen1()
             }
             else
             {
-                lv_label_set_text(ui_other_weather, WiFi.localIP().toString().c_str());
+                char buf[32];
+                float pressureMmHg = weatherData.pressureHpa * 0.75006156f;
+                snprintf(buf, sizeof(buf), "%.0f mmHg", pressureMmHg);
+                lv_label_set_text(ui_other_weather, buf);
             }
             toggleStatus = !toggleStatus;
         }
@@ -593,7 +598,23 @@ void handleScreen7Timeout()
         (millis() - appState.screen7StartTime > 2500))
     {
         appState.screen7Active = false;
-        switchScreen(appState.previousScreen);
+
+        ScreenID targetScreen = appState.screen7ReturnScreen;
+        if (targetScreen == SCREEN_7)
+        {
+            targetScreen = SCREEN_1;
+        }
+        if (targetScreen == SCREEN_2 && !appState.screen2Active)
+        {
+            targetScreen = SCREEN_1;
+        }
+        if (targetScreen == SCREEN_4 && !appState.pcConnected)
+        {
+            targetScreen = SCREEN_1;
+        }
+
+        appState.screen7ReturnScreen = SCREEN_1;
+        switchScreen(targetScreen);
     }
 }
 

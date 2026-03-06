@@ -18,7 +18,29 @@
 
 namespace
 {
+    constexpr const char *UI_COLOR_FILE = "/ui_colors.json";
     bool otaCallbackRegistered = false;
+
+    ScreenID resolveScreen7ReturnScreen()
+    {
+        ScreenID target = appState.currentScreen;
+
+        if (target == SCREEN_7)
+        {
+            target = appState.screen7ReturnScreen;
+        }
+
+        if (target == SCREEN_2 && !appState.screen2Active)
+        {
+            target = SCREEN_1;
+        }
+        if (target == SCREEN_4 && !appState.pcConnected)
+        {
+            target = SCREEN_1;
+        }
+
+        return target;
+    }
 
     bool parseLedColorValue(JsonVariantConst value, uint32_t &outColor)
     {
@@ -101,6 +123,120 @@ namespace
         return parseFloatValue(doc[key], outValue);
     }
 
+    lv_obj_t *resolveColorTarget(const String &screen, const String &element)
+    {
+        if (screen == "screen1")
+        {
+            if (element == "city")
+                return ui_city;
+            if (element == "region")
+                return ui_region;
+            if (element == "main_hours")
+                return ui_main_hours;
+            if (element == "main_minute")
+                return ui_main_minute;
+            if (element == "main_seconds")
+                return ui_main_seconds;
+            if (element == "date")
+                return ui_date;
+            if (element == "day")
+                return ui_day;
+            if (element == "simb_weather")
+                return ui_simb_weather;
+            if (element == "templabel")
+                return ui_templabel;
+            if (element == "hmlabel")
+                return ui_hmlabel;
+            if (element == "other_weather")
+                return ui_other_weather;
+            if (element == "background")
+                return ui_Screen1;
+        }
+        else if (screen == "screen2")
+        {
+            if (element == "volume_value")
+                return ui_volume_value;
+        }
+        else if (screen == "screen3")
+        {
+            if (element == "hours")
+                return ui_hours;
+            if (element == "minutes")
+                return ui_minutes;
+        }
+        else if (screen == "screen4")
+        {
+            if (element == "cpulabel")
+                return ui_cpulabel;
+            if (element == "gpulabel")
+                return ui_gpulabel;
+            if (element == "ramlabel")
+                return ui_ramlabel;
+        }
+
+        return nullptr;
+    }
+
+    bool applyUiColor(const String &screen, const String &element, const String &colorHex)
+    {
+        lv_obj_t *target = resolveColorTarget(screen, element);
+        if (!target)
+        {
+            Serial.printf("[UI] Color target not found: %s/%s\n", screen.c_str(), element.c_str());
+            return false;
+        }
+
+        lv_color_t lvColor = hexToColor(colorHex);
+        if (element == "background" || element == "region" || element == "simb_weather")
+        {
+            lv_obj_set_style_bg_color(target, lvColor, LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(target, LV_OPA_COVER, LV_PART_MAIN);
+        }
+        else
+        {
+            lv_obj_set_style_text_color(target, lvColor, LV_PART_MAIN);
+        }
+
+        return true;
+    }
+
+    DynamicJsonDocument loadUiColorStore()
+    {
+        DynamicJsonDocument doc(2048);
+        File file = LittleFS.open(UI_COLOR_FILE, "r");
+        if (!file)
+        {
+            return doc;
+        }
+
+        DeserializationError err = deserializeJson(doc, file);
+        file.close();
+        if (err)
+        {
+            Serial.printf("[UI] Failed to read saved colors: %s\n", err.c_str());
+            doc.clear();
+        }
+
+        return doc;
+    }
+
+    void persistUiColor(const String &screen, const String &element, const String &colorHex)
+    {
+        DynamicJsonDocument doc = loadUiColorStore();
+        String key = screen + "|" + element;
+        doc[key] = colorHex;
+
+        File file = LittleFS.open(UI_COLOR_FILE, "w");
+        if (!file)
+        {
+            Serial.println("[UI] Failed to open color store for writing");
+            return;
+        }
+
+        serializeJson(doc, file);
+        file.close();
+    }
+
     void onOtaEvent(int progress, const char *stage, const char *message)
     {
         DynamicJsonDocument response(256);
@@ -161,31 +297,44 @@ void processJSONCommand(JsonDocument &doc)
     {
         String name = doc["name"] | "";
         String author = doc["author"] | "";
+        bool sameTrack = (name == appState.currentSongName) && (author == appState.currentSongAuthor);
 
         if (xSemaphoreTake(uiMutex, portMAX_DELAY) == pdTRUE)
         {
             if (ui_songname)
             {
                 String formatted = "-" + name + "-";
-                lv_label_set_text(ui_songname, formatted.c_str());
+                lv_obj_set_width(ui_songname, 220);
                 lv_label_set_long_mode(ui_songname, LV_LABEL_LONG_SCROLL_CIRCULAR);
-                lv_obj_set_style_anim_speed(ui_songname, 30, 0);
+                lv_label_set_text(ui_songname, formatted.c_str());
+                lv_obj_set_style_anim_speed(ui_songname, 70, 0);
             }
 
             if (ui_songauthor)
             {
-                lv_label_set_text(ui_songauthor, author.c_str());
+                lv_obj_set_width(ui_songauthor, 220);
                 lv_label_set_long_mode(ui_songauthor, LV_LABEL_LONG_SCROLL_CIRCULAR);
-                lv_obj_set_style_anim_speed(ui_songauthor, 30, 0);
+                lv_label_set_text(ui_songauthor, author.c_str());
+                lv_obj_set_style_anim_speed(ui_songauthor, 70, 0);
             }
 
             xSemaphoreGive(uiMutex);
         }
 
+        appState.currentSongName = name;
+        appState.currentSongAuthor = author;
+
+        if (sameTrack && appState.screen7Active && appState.currentScreen == SCREEN_7)
+        {
+            return;
+        }
+
+        appState.screen7ReturnScreen = resolveScreen7ReturnScreen();
         appState.screen7Active = true;
         appState.screen7StartTime = millis();
 
         switchScreen(SCREEN_7);
+        return;
     }
 
     // --- СТАРЫЙ ФОРМАТ (для совместимости) ---
@@ -302,6 +451,7 @@ void processJSONCommand(JsonDocument &doc)
         // Удаляем файлы с флэша
         LittleFS.remove("/bus_schedule.json");
         LittleFS.remove("/anim.bin");
+        LittleFS.remove(UI_COLOR_FILE);
 
         Serial.println("[WS] Settings cleared. Restarting...");
         delay(500);
@@ -342,24 +492,23 @@ void processJSONCommand(JsonDocument &doc)
 
 void handleVolumeCommand(int volume)
 {
-    // Если это только что пришедший сигнал громкости (первый в серии)
+    // First volume packet in a series
     if (!appState.volumeModeActive)
     {
         startVolumeMode(volume);
-        appState.previousScreen = appState.currentScreen; // Запоминаем текущий экран
+        appState.previousScreen = appState.currentScreen;
     }
 
     appState.volumeLevel = constrain(volume, 0, 100);
-    appState.screen2StartTime = millis(); // Обновляем таймер, чтобы экран не закрылся раньше времени
+    appState.screen2StartTime = millis();
+    appState.screen2Active = true;
 
-    // Переключаем экран на SCREEN_2 (где полоска громкости)
+    // Show volume overlay immediately
     if (appState.currentScreen != SCREEN_2)
     {
         switchScreen(SCREEN_2);
-        appState.screen2Active = true;
     }
 
-    // Обновляем визуальные элементы (бар и цифры)
     if (xSemaphoreTake(uiMutex, portMAX_DELAY) == pdTRUE)
     {
         if (ui_soundbar)
@@ -448,63 +597,39 @@ void handlePcLoadCommand(JsonDocument &doc)
 
 void handleSetColorCommand(JsonDocument &doc)
 {
-    // Вызывается внутри мьютекса
     String screen = doc["screen"] | "";
     String element = doc["element"] | "";
     String colorHex = doc["color"] | "";
 
-    lv_color_t lvColor = hexToColor(colorHex);
-    lv_obj_t *target = nullptr;
-    if (screen == "screen1")
+    if (screen.length() == 0 || element.length() == 0 || colorHex.length() == 0)
     {
-        if (element == "city")
-            target = ui_city;
-        else if (element == "region")
-            target = ui_region;
-        else if (element == "main_hours")
-            target = ui_main_hours;
-        else if (element == "main_minute")
-            target = ui_main_minute;
-        else if (element == "main_seconds")
-            target = ui_main_seconds;
-        else if (element == "date")
-            target = ui_date;
-        else if (element == "day")
-            target = ui_day;
-        else if (element == "simb_weather")
-            target = ui_simb_weather;
-        else if (element == "templabel")
-            target = ui_templabel;
-        else if (element == "hmlabel")
-            target = ui_hmlabel;
-        else if (element == "other_weather")
-            target = ui_other_weather;
-    }
-    else if (screen == "screen2")
-    {
-        if (element == "volume_value")
-            target = ui_volume_value;
-    }
-    else if (screen == "screen3")
-    {
-        if (element == "hours")
-            target = ui_hours;
-        else if (element == "minutes")
-            target = ui_minutes;
-    }
-    else if (screen == "screen4")
-    {
-        if (element == "cpulabel")
-            target = ui_cpulabel;
-        else if (element == "gpulabel")
-            target = ui_gpulabel;
-        else if (element == "ramlabel")
-            target = ui_ramlabel;
+        return;
     }
 
-    if (target)
+    if (applyUiColor(screen, element, colorHex))
     {
-        lv_obj_set_style_text_color(target, lvColor, LV_PART_MAIN);
+        persistUiColor(screen, element, colorHex);
+    }
+}
+
+void applySavedUiColors()
+{
+    DynamicJsonDocument doc = loadUiColorStore();
+    JsonObject obj = doc.as<JsonObject>();
+
+    for (JsonPair kv : obj)
+    {
+        String key = kv.key().c_str();
+        int separatorPos = key.indexOf('|');
+        if (separatorPos <= 0 || separatorPos >= key.length() - 1)
+        {
+            continue;
+        }
+
+        String screen = key.substring(0, separatorPos);
+        String element = key.substring(separatorPos + 1);
+        String colorHex = kv.value().as<String>();
+        applyUiColor(screen, element, colorHex);
     }
 }
 
@@ -681,7 +806,7 @@ void handleSettingsCommand(JsonDocument &doc)
         if (weatherUseCoordsChanged)
             prefs.putBool("useCoords", appState.useCoordinates);
         if (weatherTimeoutChanged)
-            prefs.putUInt("weatherTimeoutSec", (uint32_t)appState.weatherTimeoutSec);
+            prefs.putUInt("weatherTmo", (uint32_t)appState.weatherTimeoutSec);
         prefs.end();
 
         if (weatherShouldRefreshNow)
@@ -733,7 +858,7 @@ void handleLedStateCommand(JsonDocument &doc)
         hasColor = parseLedColorValue(doc["led_color"], color);
     }
 
-    if (mode >= LED_MODE_STATIC && mode <= LED_MODE_MATRIX)
+    if (mode >= LED_MODE_STATIC && mode <= LED_MODE_PRISM)
     {
         appState.defaultLedMode = mode;
         if (!appState.volumeModeActive)
@@ -824,3 +949,5 @@ void handleGifCommand(JsonDocument &doc)
     }
     http.end();
 }
+
+

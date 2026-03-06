@@ -68,6 +68,10 @@ void saveSettings()
     preferences.putInt("buzzerVolume", appState.buzzerVolume);
     preferences.putInt("ledMode", appState.defaultLedMode);
     preferences.putInt("ledBrightness", appState.ledBrightness);
+    preferences.putUInt("ledColor", appState.ledColor);
+    preferences.putFloat("autoGamma", appState.autoBrightnessGamma);
+    preferences.putFloat("autoSmooth", appState.autoBrightnessSmoothing);
+    preferences.putInt("autoNightMin", appState.autoBrightnessNightMin);
     preferences.putInt("autoLedMin", appState.autoLedMin);
     preferences.putInt("autoLedMax", appState.autoLedMax);
     preferences.putBool("sleepEnabled", appState.sleepEnabled);
@@ -84,7 +88,11 @@ void loadSettings()
     appState.buzzerVolume = preferences.getInt("buzzerVolume", 60);
     appState.defaultLedMode = preferences.getInt("ledMode", 5);
     appState.ledBrightness = preferences.getInt("ledBrightness", 120);
+    appState.ledColor = preferences.getUInt("ledColor", 0xFFFFFF);
     appState.ledMode = appState.defaultLedMode;
+    appState.autoBrightnessGamma = preferences.getFloat("autoGamma", 2.2f);
+    appState.autoBrightnessSmoothing = preferences.getFloat("autoSmooth", 0.1f);
+    appState.autoBrightnessNightMin = preferences.getInt("autoNightMin", 0);
     appState.autoLedMin = preferences.getInt("autoLedMin", 10);
     appState.autoLedMax = preferences.getInt("autoLedMax", 255);
     appState.sleepEnabled = preferences.getBool("sleepEnabled", false);

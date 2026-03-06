@@ -18,10 +18,10 @@
   },
   "backlight": {
     "brightness": 168,
-    "mode": "2",
-    "led_mode": 2,
+    "mode": "1",
+    "led_mode": 1,
     "weather_dependent": false,
-    "color": "#FF5916"
+    "color": "#5C00FF"
   },
   "schedule": {
     "start_time": "07:50",
@@ -59,7 +59,14 @@
   },
   "ui_colors": {
     "screen1": {
-      "main_minute": "#FF3DB2"
+      "main_minute": "#7B01FF",
+      "date": "#FFA112",
+      "day": "#7B01FF",
+      "region": "#7B01FF",
+      "city": "#FFA112",
+      "background": "#000000",
+      "simb_weather": "#FFA112",
+      "other_weather": "#6F00FF"
     }
   },
   "bus_settings": {

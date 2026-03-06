@@ -1,6 +1,7 @@
 import asyncio
 import psutil
-import GPUtil
+
+from backend.core.gpu import get_gpu_load_percent
 
 
 class AsyncSystemMonitor:
@@ -26,13 +27,7 @@ class AsyncSystemMonitor:
         self._task = None
 
     def _get_gpu_load(self):
-        try:
-            gpus = GPUtil.getGPUs()
-            if not gpus:
-                return 0.0
-            return gpus[0].load * 100
-        except Exception:
-            return 0.0
+        return get_gpu_load_percent()
 
     async def start(self):
         if self._running:

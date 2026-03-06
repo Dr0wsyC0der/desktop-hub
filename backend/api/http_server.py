@@ -10,6 +10,7 @@ import aiohttp
 from aiohttp import web
 
 from backend.core.alive_services import AppContext
+from backend.core.paths import data_path
 
 
 DEFAULT_APP_SETTINGS = {
@@ -58,8 +59,8 @@ HEX_COLOR_RE = re.compile(r"^#?[0-9A-Fa-f]{6}$")
 
 
 class APIServer:
-    SETTINGS_PATH = Path("backend/storage/settings.json")
-    LEGACY_UI_SETTINGS_PATH = Path("backend/storage/ui_settings.json")
+    SETTINGS_PATH = data_path("backend", "storage", "settings.json")
+    LEGACY_UI_SETTINGS_PATH = data_path("backend", "storage", "ui_settings.json")
     BUS_SETTINGS_PATH = SETTINGS_PATH
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8787):
@@ -848,7 +849,7 @@ class APIServer:
             mode = int(str(value).strip())
         except (TypeError, ValueError):
             mode = 5
-        return max(1, min(7, mode))
+        return max(1, min(8, mode))
 
     def _coord_payload_value(self, value: Any) -> float | str:
         raw = str(value).strip()

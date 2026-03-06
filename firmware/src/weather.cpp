@@ -69,6 +69,7 @@ void updateWeather()
         weatherData.region = doc["sys"]["country"] | "";
         weatherData.temperature = doc["main"]["temp"] | 0.0;
         weatherData.feelsLike = doc["main"]["feels_like"] | 0.0;
+        weatherData.pressureHpa = doc["main"]["pressure"] | 0.0;
         weatherData.humidity = doc["main"]["humidity"] | 0;
 
         String mainCondition = doc["weather"][0]["main"] | "";

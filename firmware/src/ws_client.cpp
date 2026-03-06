@@ -310,14 +310,7 @@ void reconnectWebSocket()
         return;
     }
 
-    String ip = appState.pcIP;
-    if (ip.length() == 0)
-    {
-        setDiscoveryListening(true);
-        return;
-    }
-
-    beginWebSocketConnect(ip);
+    setDiscoveryListening(true);
 }
 
 void sendWebSocketMessage(const String &message)
@@ -354,14 +347,7 @@ void forceWebSocketReconnect()
     wsCooldownUntil = 0;
     updateConnectionStatus();
 
-    if (appState.pcIP.length() > 0)
-    {
-        beginWebSocketConnect(appState.pcIP);
-    }
-    else
-    {
-        setDiscoveryListening(true);
-    }
+    setDiscoveryListening(true);
 }
 
 void onWiFiConnectionChanged(bool connected)

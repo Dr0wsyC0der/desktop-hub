@@ -3,15 +3,28 @@ import base64
 import colorsys
 import io
 import json
+import os
 import re
+import subprocess
+import sys
+import time
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+try:
+    import winreg
+except Exception:  # pragma: no cover - only for non-Windows environments
+    winreg = None
 
 import flet as ft
 from PIL import Image, ImageOps
 
 
 API_BASE = "http://127.0.0.1:8787/api"
+BACKEND_TASK_NAME = "ESPWidgetBackend"
+BACKEND_RUN_VALUE_NAME = "ESPWidgetBackend"
+RUNTIME_STATE_FILE = "runtime_state.json"
 
 SCREEN_ELEMENTS = {
     "screen1": [
@@ -49,8 +62,9 @@ LED_EFFECTS = [
     ("3", "3 - Comet"),
     ("4", "4 - Rainbow pong"),
     ("5", "5 - Rainbow"),
-    ("6", "6 - Fire"),
-    ("7", "7 - Matrix"),
+    ("6", "6 - Confetti"),
+    ("7", "7 - Aurora"),
+    ("8", "8 - Prism"),
 ]
 LED_MODES_WITH_COLOR = {"1", "2", "3"}
 HEX_PATTERN = re.compile(r"^#?[0-9A-Fa-f]{6}$")
@@ -68,6 +82,244 @@ def api_request(path: str, method: str = "GET", data: dict | None = None):
         return json.loads(raw) if raw else {}
 
 
+def runtime_state_path() -> Path:
+    appdata = os.environ.get("APPDATA")
+    base = Path(appdata) if appdata else (Path.home() / "AppData" / "Roaming")
+    return base / "ESPWidget" / RUNTIME_STATE_FILE
+
+
+def load_runtime_state() -> dict:
+    path = runtime_state_path()
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_runtime_state(state: dict):
+    path = runtime_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def app_root_path() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def resolve_backend_command() -> tuple[list[str] | None, Path | None]:
+    root = app_root_path()
+    if getattr(sys, "frozen", False):
+        for exe_name in ("backend_service.exe", "backend.exe"):
+            backend_exe = root / exe_name
+            if backend_exe.exists():
+                return [str(backend_exe)], root
+        return None, None
+
+    backend_script = root / "backend" / "main.py"
+    if not backend_script.exists():
+        return None, None
+
+    return [sys.executable, str(backend_script)], root
+
+
+def backend_is_online(timeout_sec: float = 1.0) -> bool:
+    req = urllib.request.Request(f"{API_BASE}/status", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as response:
+            return int(getattr(response, "status", 0)) == 200
+    except Exception:
+        return False
+
+
+def start_backend_process() -> tuple[bool, str]:
+    command, cwd = resolve_backend_command()
+    if not command:
+        return False, "Backend executable not found"
+
+    creationflags = (
+        getattr(subprocess, "DETACHED_PROCESS", 0)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    )
+
+    try:
+        subprocess.Popen(
+            command,
+            cwd=str(cwd) if cwd else None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+    except Exception as e:
+        return False, str(e)
+
+    return True, "Backend started"
+
+
+def ensure_backend_online(wait_seconds: float = 8.0) -> tuple[bool, str]:
+    if backend_is_online():
+        return True, "Backend already running"
+
+    started, start_msg = start_backend_process()
+    if not started:
+        return False, start_msg
+
+    deadline = time.time() + max(1.0, float(wait_seconds))
+    while time.time() < deadline:
+        if backend_is_online():
+            return True, "Backend is online"
+        time.sleep(0.35)
+
+    return False, "Backend startup timeout"
+
+
+def quote_cmd_arg(value: str) -> str:
+    escaped = str(value).replace('"', '""')
+    return f'"{escaped}"'
+
+
+def backend_launch_command_string() -> str | None:
+    command, _cwd = resolve_backend_command()
+    if not command:
+        return None
+
+    return " ".join(quote_cmd_arg(part) for part in command)
+
+
+def set_registry_autostart(enable: bool, launch_command: str | None = None) -> tuple[bool, str]:
+    if winreg is None:
+        return False, "winreg unavailable"
+
+    run_key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key_path, 0, winreg.KEY_SET_VALUE) as key:
+            if enable:
+                if not launch_command:
+                    return False, "Backend launch command is empty"
+                winreg.SetValueEx(key, BACKEND_RUN_VALUE_NAME, 0, winreg.REG_SZ, launch_command)
+                return True, "Autostart enabled in HKCU Run"
+
+            try:
+                winreg.DeleteValue(key, BACKEND_RUN_VALUE_NAME)
+            except FileNotFoundError:
+                pass
+            return True, "Autostart disabled in HKCU Run"
+    except Exception as e:
+        return False, str(e)
+
+
+def run_cmd(args: list[str], creationflags: int = 0) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=creationflags,
+    )
+
+
+def task_scheduler_has_task(task_name: str) -> bool:
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = run_cmd(["schtasks", "/Query", "/TN", task_name], creationflags=create_no_window)
+    return result.returncode == 0
+
+
+def _task_create_command_args(launch_command: str) -> list[str]:
+    return [
+        "/Create",
+        "/F",
+        "/SC",
+        "ONLOGON",
+        "/RL",
+        "LIMITED",
+        "/TN",
+        BACKEND_TASK_NAME,
+        "/TR",
+        launch_command,
+    ]
+
+
+def _ps_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def create_task_scheduler_autostart(launch_command: str) -> tuple[bool, str]:
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    args = _task_create_command_args(launch_command)
+    result = run_cmd(["schtasks", *args], creationflags=create_no_window)
+    if result.returncode == 0:
+        return True, "Task Scheduler task created"
+
+    error_text = (result.stderr or result.stdout or "schtasks failed").strip()
+    lowered = error_text.lower()
+    if "access is denied" not in lowered and "отказано в доступе" not in lowered:
+        return False, error_text
+
+    # Retry once with elevation prompt to force a real Scheduled Task.
+    ps_args_literal = "@(" + ",".join(_ps_quote(part) for part in args) + ")"
+    ps_cmd = (
+        f"$argsList={ps_args_literal}; "
+        "Start-Process -FilePath 'schtasks.exe' -ArgumentList $argsList -Verb RunAs -Wait"
+    )
+    elevated = run_cmd(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+        creationflags=create_no_window,
+    )
+    if elevated.returncode == 0 and task_scheduler_has_task(BACKEND_TASK_NAME):
+        return True, "Task Scheduler task created (elevated)"
+
+    elevated_err = (elevated.stderr or elevated.stdout or "elevation declined or failed").strip()
+    return False, f"{error_text}; elevated attempt: {elevated_err}"
+
+
+def set_backend_autostart(enable: bool) -> tuple[bool, str]:
+    if enable:
+        launch_command = backend_launch_command_string()
+        if not launch_command:
+            return False, "Backend executable not found"
+
+        task_ok, task_msg = create_task_scheduler_autostart(launch_command)
+        if task_ok:
+            set_registry_autostart(False)
+            return True, "Autostart enabled in Task Scheduler"
+
+        # Fallback for locked-down systems: keep autostart via HKCU Run.
+        reg_ok, reg_msg = set_registry_autostart(True, launch_command)
+        if reg_ok:
+            return True, f"{reg_msg} (Task Scheduler failed: {task_msg})"
+        return False, f"Task Scheduler: {task_msg}; Registry: {reg_msg}"
+
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    task_result = run_cmd(["schtasks", "/Delete", "/F", "/TN", BACKEND_TASK_NAME], creationflags=create_no_window)
+    output = f"{task_result.stdout}\n{task_result.stderr}".lower()
+    task_ok_or_missing = (
+        task_result.returncode == 0
+        or "cannot find" in output
+        or "не удается найти" in output
+    )
+
+    reg_ok, reg_msg = set_registry_autostart(False)
+
+    if task_ok_or_missing and reg_ok:
+        return True, "Autostart disabled"
+    if task_ok_or_missing:
+        return False, f"Registry: {reg_msg}"
+
+    task_err = (task_result.stderr or task_result.stdout or "schtasks failed").strip()
+    if reg_ok:
+        return True, f"Task Scheduler disable failed: {task_err}; HKCU Run entry removed"
+    return False, f"Task Scheduler: {task_err}; Registry: {reg_msg}"
+
+
 def normalize_led_mode(value) -> str:
     legacy_map = {
         "static": "1",
@@ -78,7 +330,10 @@ def normalize_led_mode(value) -> str:
         "rainbow-pong": "4",
         "rainbow": "5",
         "fire": "6",
+        "confetti": "6",
         "matrix": "7",
+        "aurora": "7",
+        "prism": "8",
     }
     if value is None:
         return "5"
@@ -557,6 +812,48 @@ def main(page: ft.Page):
         page.snack_bar = ft.SnackBar(ft.Text(message), bgcolor="#15803D" if ok else "#B91C1C")
         page.snack_bar.open = True
         page.update()
+
+    def prompt_autostart_on_first_run():
+        state = load_runtime_state()
+        if bool(state.get("autostart_prompted", False)):
+            return
+
+        def close_dialog(_event=None):
+            page.pop_dialog()
+            page.update()
+
+        def save_choice(enabled: bool, notify_message: str | None = None, ok: bool = True, prompted: bool = True):
+            latest = load_runtime_state()
+            latest["autostart_prompted"] = bool(prompted)
+            latest["autostart_enabled"] = bool(enabled)
+            save_runtime_state(latest)
+            if notify_message:
+                toast(notify_message, ok=ok)
+
+        def choose_enable(_event=None):
+            close_dialog()
+            success, message = set_backend_autostart(True)
+            if success:
+                save_choice(True, f"Автозапуск backend включён: {message}")
+            else:
+                save_choice(False, f"Не удалось включить автозапуск: {message}", ok=False, prompted=False)
+
+        def choose_disable(_event=None):
+            close_dialog()
+            set_backend_autostart(False)
+            save_choice(False, "Автозапуск backend не включён")
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Первый запуск"),
+            content=ft.Text("Включить автозапуск backend при входе в Windows?"),
+            actions=[
+                ft.TextButton("Нет", on_click=choose_disable),
+                ft.TextButton("Да", on_click=choose_enable),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        page.show_dialog(dialog)
 
     def update_settings_summary():
         settings_summary.value = (
@@ -1164,6 +1461,12 @@ def main(page: ft.Page):
     )
 
     page.add(tabs)
+
+    backend_ok, backend_message = ensure_backend_online()
+    if not backend_ok:
+        toast(f"Backend error: {backend_message}", ok=False)
+
+    prompt_autostart_on_first_run()
 
     update_element_options()
     toggle_screen_manual()

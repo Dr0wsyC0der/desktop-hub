@@ -1,15 +1,15 @@
 import aiohttp
 import asyncio
 import json
-from pathlib import Path
 from datetime import date, timedelta, datetime
 from backend.parsers.bus_shedule_parser import TransportScheduleParser
 from backend.core.network import has_internet
+from backend.core.paths import data_path
 
 
 class BusService:
-    SCHEDULE_PATH = Path("backend/storage/schedule.json")
-    SETTINGS_PATH = Path("backend/storage/settings.json")
+    SCHEDULE_PATH = data_path("backend", "storage", "schedule.json")
+    SETTINGS_PATH = data_path("backend", "storage", "settings.json")
 
     def __init__(self):
         self.settings = self._load_settings()

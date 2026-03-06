@@ -81,6 +81,7 @@ struct AppState
     // Song overlay
     bool screen7Active = false;
     unsigned long screen7StartTime = 0;
+    ScreenID screen7ReturnScreen = SCREEN_1;
     String currentSongName;
     String currentSongAuthor;
 
@@ -105,6 +106,7 @@ struct WeatherData
     String region;
     float temperature = 0;
     float feelsLike = 0;
+    float pressureHpa = 0;
     int humidity = 0;
     String condition;
     String localIP;

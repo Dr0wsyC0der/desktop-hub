@@ -14,5 +14,6 @@ void handleSettingsCommand(JsonDocument &doc);
 void handleLedStateCommand(JsonDocument &doc);
 void handleOtaCommand(JsonDocument &doc);
 void handleGifCommand(JsonDocument &doc);
+void applySavedUiColors();
 
 #endif

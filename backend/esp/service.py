@@ -7,12 +7,13 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
-import GPUtil
 import psutil
 
 from .connection import ESPConnection
 from .gif_codec import build_rgb565_from_gif
 from ..core.alive_services import AppContext
+from ..core.gpu import get_gpu_load_percent
+from ..core.paths import data_path
 
 
 DEFAULT_STORED_SETTINGS = {
@@ -55,7 +56,7 @@ HEX_COLOR_RE = re.compile(r"^#?[0-9A-Fa-f]{6}$")
 
 
 class ESPService:
-    SETTINGS_PATH = Path("backend/storage/settings.json")
+    SETTINGS_PATH = data_path("backend", "storage", "settings.json")
 
     def __init__(self, bus):
         self.bus = bus
@@ -64,11 +65,11 @@ class ESPService:
         self.last_message = None
         self._gif_lock = asyncio.Lock()
         self._gif_assets_dirs = [
-            Path("backend/storage/gifs"),
-            Path("ui/assets/gifs"),
-            Path("ui/assets"),
-            Path("assets/gifs"),
-            Path("assets"),
+            data_path("backend", "storage", "gifs"),
+            data_path("ui", "assets", "gifs"),
+            data_path("ui", "assets"),
+            data_path("assets", "gifs"),
+            data_path("assets"),
         ]
 
         # Параметры мониторинга нагрузки ПК
@@ -233,13 +234,7 @@ class ESPService:
             await self._send_pc_load(cpu, gpu, ram)
 
     def _get_gpu_load(self) -> float:
-        try:
-            gpus = GPUtil.getGPUs()
-            if not gpus:
-                return 0.0
-            return gpus[0].load * 100
-        except Exception:
-            return 0.0
+        return get_gpu_load_percent()
 
     async def _send_pc_load(self, cpu: float, gpu: float, ram: float):
         """
@@ -292,7 +287,7 @@ class ESPService:
         command = {
             "type": "settings",
             "led_brightness": brightness_raw,
-            "led_mode": max(1, min(7, led_mode)),
+            "led_mode": max(1, min(8, led_mode)),
             "led_weather_dependent": bool(payload.get("weather_dependent", False)),
         }
 
@@ -304,6 +299,15 @@ class ESPService:
             command["led_weather_brightness"] = self._brightness_byte(payload.get("weather_brightness", brightness_raw))
 
         await self.conn.broadcast_json(command)
+
+    async def send_backlight_brightness(self, payload: dict):
+        brightness_raw = self._brightness_byte(payload.get("brightness", payload.get("backlight", 180)))
+        await self.conn.broadcast_json(
+            {
+                "type": "settings",
+                "led_brightness": brightness_raw,
+            }
+        )
 
     async def send_settings_patch(self, patch: dict):
         if not isinstance(patch, dict):
@@ -331,7 +335,7 @@ class ESPService:
 
         backlight_payload = settings.get("backlight")
         if isinstance(backlight_payload, dict):
-            await self.send_backlight_settings(backlight_payload)
+            await self.send_backlight_brightness(backlight_payload)
 
     async def send_saved_interface_colors(self, settings: dict):
         ui_colors = settings.get("ui_colors", {})

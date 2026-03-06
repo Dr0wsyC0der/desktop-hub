@@ -19,8 +19,9 @@ enum LedMode
     LED_MODE_COMET = 3,
     LED_MODE_RAINBOW_PONG = 4,
     LED_MODE_RAINBOW = 5,
-    LED_MODE_FIRE = 6,
-    LED_MODE_MATRIX = 7
+    LED_MODE_CONFETTI = 6,
+    LED_MODE_AURORA = 7,
+    LED_MODE_PRISM = 8
 };
 
 #endif
