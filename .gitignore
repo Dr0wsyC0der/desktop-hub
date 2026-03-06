@@ -63,3 +63,6 @@ yarn-error.log
 # OS
 Thumbs.db
 .DS_Store
+
+# Build artifacts
+installer/*.exe

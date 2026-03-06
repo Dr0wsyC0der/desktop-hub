@@ -36,7 +36,7 @@ function Remove-TreeWithRetry {
     }
 }
 
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 Set-Location $repoRoot
 
 Write-Host "Installing build tooling..."
@@ -56,7 +56,7 @@ python -m PyInstaller `
     --windowed `
     --onefile `
     --name backend_service `
-    backend\main.py
+    pc_service\backend\main.py
 
 Write-Host "Building esp_widget.exe..."
 $fletDesktopApp = python -c "import pathlib, flet_desktop; print(pathlib.Path(flet_desktop.__file__).resolve().parent / 'app')"
@@ -71,11 +71,11 @@ python -m PyInstaller `
     --windowed `
     --onefile `
     --name esp_widget `
-    --icon ui\assets\app.ico `
+    --icon pc_service\ui\assets\app.ico `
     --collect-all flet `
     --collect-all flet_desktop `
     --add-data "$fletDesktopApp;flet_desktop" `
-    ui\app.py
+    pc_service\ui\app.py
 
 $releaseDir = Join-Path $repoRoot "dist\release"
 New-Item -Path $releaseDir -ItemType Directory -Force | Out-Null
@@ -85,7 +85,7 @@ Copy-Item "dist\esp_widget.exe" $releaseDir -Force
 
 $backendDir = Join-Path $releaseDir "backend"
 New-Item -Path $backendDir -ItemType Directory -Force | Out-Null
-Copy-Item "backend\storage" $backendDir -Recurse -Force
+Copy-Item "pc_service\backend\storage" $backendDir -Recurse -Force
 
 Write-Host ""
 Write-Host "Release bundle is ready:"
